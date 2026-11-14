@@ -143,23 +143,21 @@ jobs:
             $cleared = (& "$folder\pw.exe" --clear | Out-String).Trim()
             if (-not $cleared.EndsWith("from $folder\data")) { throw "a portable pw recorded elsewhere: $cleared" }
           }
-          # Start-Process -Wait would also wait for every process the program
-          # starts, the recorder setup launches included, which runs until
-          # stopped; this waits for the program alone. Reading Handle keeps
-          # the process open so its exit code survives its exit.
-          function Wait-Program($path, $arguments) {
-            $run = Start-Process $path -PassThru -ArgumentList $arguments
+          # Start-Process -Wait waits for every process the program starts.
+          # Setup starts the recorder, which runs until stopped, so setup is
+          # waited for alone; reading Handle keeps the process open so its
+          # exit code survives its exit.
+          function Invoke-Setup($arguments) {
+            $run = Start-Process $setup -PassThru -ArgumentList (@('/VERYSILENT', '/SUPPRESSMSGBOXES', '/CURRENTUSER') + $arguments)
             $null = $run.Handle
             $run.WaitForExit()
-            if ($run.ExitCode -ne 0) { throw "$path exited with $($run.ExitCode)" }
+            if ($run.ExitCode -ne 0) { throw "setup exited with $($run.ExitCode)" }
           }
-          function Invoke-Setup($arguments) {
-            Wait-Program $setup (@('/VERYSILENT', '/SUPPRESSMSGBOXES', '/CURRENTUSER') + $arguments)
-          }
+          # The uninstaller hands its work, the PATH edit last, to a copy of
+          # itself in TEMP (_iu*.tmp) and exits; -Wait waits for that copy too.
           function Invoke-Uninstall($folder) {
-            Wait-Program "$folder\unins000.exe" @('/VERYSILENT', '/SUPPRESSMSGBOXES')
-            # The uninstaller hands its work to a copy of itself in TEMP (_iu*.tmp) and exits.
-            Get-Process -Name '_iu*' -ErrorAction SilentlyContinue | Wait-Process
+            $run = Start-Process "$folder\unins000.exe" -Wait -PassThru -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES'
+            if ($run.ExitCode -ne 0) { throw "the uninstaller exited with $($run.ExitCode)" }
           }
 
           Add-Type -AssemblyName System.IO.Compression.FileSystem
