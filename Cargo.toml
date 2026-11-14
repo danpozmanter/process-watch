@@ -1,0 +1,38 @@
+[package]
+name = "process-watch"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Top programs by RAM or CPU over the past hours, with subprocesses rolled into the program that ran them"
+license = "Apache-2.0"
+publish = false
+
+[[bin]]
+name = "pw"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2.180"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Wdk_System_SystemInformation",
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[lints.clippy]
+cognitive_complexity = "warn"
+too_many_lines = "warn"

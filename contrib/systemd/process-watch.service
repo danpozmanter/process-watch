@@ -1,0 +1,10 @@
+[Unit]
+Description=process-watch recorder
+
+[Service]
+ExecStart=%h/.local/bin/pw record
+Restart=on-failure
+Nice=10
+
+[Install]
+WantedBy=default.target

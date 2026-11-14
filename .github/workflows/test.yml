@@ -1,0 +1,120 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # The toolchain process-watch builds with; test.yml and release.yml name the same one.
+  RUST_VERSION: 1.95.0
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux
+            os: ubuntu-24.04
+          - name: macOS
+            os: macos-15
+          - name: Windows
+            os: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: clippy, rustfmt
+          targets: ${{ runner.os == 'Linux' && 'x86_64-unknown-linux-musl,x86_64-apple-darwin,aarch64-apple-darwin,x86_64-pc-windows-msvc,x86_64-unknown-freebsd,aarch64-unknown-linux-musl' || '' }}
+
+      - name: Workflows name the same toolchain
+        if: runner.os == 'Linux'
+        run: |
+          pins() { grep -E '^  RUST_VERSION: ' "$1"; }
+          pins .github/workflows/test.yml
+          if ! pins .github/workflows/test.yml | diff - <(pins .github/workflows/release.yml); then
+            echo "test.yml and release.yml name different toolchains" >&2
+            exit 1
+          fi
+      - name: Format
+        if: runner.os == 'Linux'
+        run: cargo fmt --check
+      # No hosted runner runs FreeBSD, so its code is linted here beside the
+      # other targets' before the FreeBSD job below tests it in a VM.
+      - name: Lint every release target
+        if: runner.os == 'Linux'
+        run: |
+          for target in x86_64-apple-darwin aarch64-apple-darwin x86_64-pc-windows-msvc \
+              x86_64-unknown-freebsd aarch64-unknown-linux-musl; do
+            echo "== $target"
+            cargo clippy --locked --target "$target" --all-targets -- -D warnings
+          done
+      - name: Lint
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Tests
+        run: cargo test --locked
+      - name: Package
+        run: scripts/package.sh dist
+      # The archive as a user gets it, unpacked and run end to end.
+      - name: Smoke test the packaged binary
+        run: |
+          mkdir try
+          if [ "$RUNNER_OS" = Windows ]; then
+            7z x -otry dist/process-watch-*-windows-x86_64.zip > /dev/null
+            tests/smoke.sh try/process-watch-*/pw.exe
+          else
+            tar -xzf dist/process-watch-*.tar.gz -C try
+            tests/smoke.sh try/process-watch-*/pw
+          fi
+
+  freebsd:
+    name: FreeBSD
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - name: Test, package, and smoke test in FreeBSD
+        uses: vmactions/freebsd-vm@v1
+        with:
+          release: "14.3"
+          usesh: true
+          envs: RUST_VERSION
+          prepare: |
+            pkg install -y bash curl
+            curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain "$RUST_VERSION"
+          run: |
+            set -e
+            . "$HOME/.cargo/env"
+            cargo test --locked
+            scripts/package.sh dist
+            mkdir try
+            tar -xzf dist/process-watch-*-freebsd-*.tar.gz -C try
+            tests/smoke.sh try/process-watch-*/pw
+
+  msrv:
+    name: Minimum Rust
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - name: Read the minimum Rust version
+        run: |
+          msrv=$(awk -F'"' '/^rust-version = / { print $2; exit }' Cargo.toml)
+          echo "MSRV=$msrv" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.MSRV }}
+      - run: cargo test --locked
