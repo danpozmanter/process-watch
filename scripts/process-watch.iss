@@ -101,8 +101,8 @@ begin
   RegWriteExpandStringValue(Root, Key, 'Path', Copy(Path, 2, Length(Path) - 2));
 end;
 
-{ Stops the recorder this installation runs, and no other pw, so its files
-  can be replaced or removed. The path is quoted for PowerShell, which
+{ Stops the recorder this installation runs, and no other pw, and waits for
+  it to exit, so its files can be replaced or removed. The path is quoted for PowerShell, which
   doubles a quote inside single quotes. }
 procedure StopRecorder;
 var
@@ -113,7 +113,7 @@ begin
   StringChangeEx(Exe, '''', '''''', True);
   Exec('powershell.exe',
     '-NoProfile -NonInteractive -Command "Get-Process pw -ErrorAction SilentlyContinue | ' +
-    'Where-Object Path -eq ''' + Exe + ''' | Stop-Process -Force"',
+    'Where-Object Path -eq ''' + Exe + ''' | Stop-Process -Force -PassThru | Wait-Process"',
     '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 end;
 

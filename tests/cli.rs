@@ -11,7 +11,10 @@ struct Scratch(PathBuf);
 
 impl Scratch {
     fn new(name: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!("pw-cli-{name}-{}", std::process::id()));
+        // Cargo's scratch folder shares the built binary's filesystem, so pw
+        // can be hard-linked into it.
+        let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
+            .join(format!("pw-cli-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         Self(dir)
@@ -195,12 +198,15 @@ fn only_one_recorder_writes_to_a_folder() {
     assert!(stdout(&cleared).ends_with("the recorder keeps recording from now\n"));
 }
 
-/// A copy of pw in its own folder, as an unpacked portable archive has it.
+/// pw in a folder of its own, as an unpacked portable archive has it. A
+/// hard link, unlike a copy, opens no file for writing that a process other
+/// tests fork at the same moment could inherit, which would leave the new
+/// executable busy and unable to run.
 fn portable_copy(scratch: &Scratch) -> PathBuf {
     let folder = scratch.path("portable");
     fs::create_dir_all(folder.join("data")).unwrap();
     let exe = folder.join(Path::new(PW).file_name().unwrap());
-    fs::copy(PW, &exe).unwrap();
+    fs::hard_link(PW, &exe).unwrap();
     exe
 }
 

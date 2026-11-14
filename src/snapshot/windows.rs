@@ -116,7 +116,7 @@ fn to_proc(info: &ProcessInformation) -> Option<Proc> {
         pid,
         ppid: info.inherited_from_unique_process_id as usize as i64,
         pgid: 0,
-        start_ns: info.create_time * 100,
+        start_ns: filetime_unix_ns(info.create_time),
         cpu_ns: (info.user_time + info.kernel_time) * 100,
         child_cpu_ns: 0,
         mem_bytes: info.working_set_private_size,
@@ -124,7 +124,17 @@ fn to_proc(info: &ProcessInformation) -> Option<Proc> {
     })
 }
 
-/// The wall clock in nanoseconds since 1601, the epoch process creation times count from.
+/// 100-nanosecond intervals from 1601, where FILETIME counts from, to 1970.
+const UNIX_EPOCH_FILETIME: i64 = 116_444_736_000_000_000;
+
+/// A FILETIME count of 100-nanosecond intervals since 1601 as nanoseconds
+/// since 1970; nanoseconds since 1601 would not fit in an `i64`.
+fn filetime_unix_ns(intervals: i64) -> i64 {
+    (intervals - UNIX_EPOCH_FILETIME) * 100
+}
+
+/// The wall clock in nanoseconds since the Unix epoch, on the clock process
+/// creation times are converted to.
 fn system_time_ns() -> i64 {
     let mut now = FILETIME {
         dwLowDateTime: 0,
@@ -132,7 +142,8 @@ fn system_time_ns() -> i64 {
     };
     // SAFETY: `now` is a valid FILETIME the call writes into.
     unsafe { GetSystemTimeAsFileTime(&raw mut now) };
-    ((u64::from(now.dwHighDateTime) << 32 | u64::from(now.dwLowDateTime)) as i64) * 100
+    let intervals = u64::from(now.dwHighDateTime) << 32 | u64::from(now.dwLowDateTime);
+    filetime_unix_ns(i64::try_from(intervals).unwrap_or(i64::MAX))
 }
 
 /// Logical CPUs online across every processor group.
@@ -167,6 +178,19 @@ fn program_name(image: String) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn filetimes_become_unix_nanoseconds() {
+        assert_eq!(filetime_unix_ns(UNIX_EPOCH_FILETIME), 0);
+        // 2026-11-14T00:00:00Z.
+        let intervals = UNIX_EPOCH_FILETIME + 1_794_614_400 * 10_000_000;
+        assert_eq!(filetime_unix_ns(intervals), 1_794_614_400_000_000_000);
+    }
+
+    #[test]
+    fn the_clock_reads_after_2020_without_overflow() {
+        assert!(system_time_ns() > 1_577_836_800_000_000_000);
+    }
 
     #[test]
     fn program_names_drop_the_exe_extension_in_any_case() {
