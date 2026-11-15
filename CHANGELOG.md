@@ -2,26 +2,26 @@
 
 ## 0.2.0
 
-- `pw PATTERN` shows only programs whose name contains the pattern, ignoring case: `pw firefo` shows `firefox`.
-- `-t`/`--threshold` shows only programs above (`>`) or below (`<`) a limit on what `--sort` ranks by: average RAM in `mb`, `gb`, or `tb` (`'>1gb'`), or with `--sort cpu`, average CPU (`'>50%'`) or CPU time (`'>10m'`).
-- A report that has no program to show prints its heading without an empty table.
+- Filter by name: `pw firefo` shows every program whose name contains `firefo`, in any case.
+- Filter by usage with `-t`/`--threshold`, such as `'>1gb'` for RAM, or `'>50%'` and `'>10m'` with `--sort cpu`.
+- A report with no matching programs shows only its heading.
 
 ## 0.1.2
 
-- On Linux 6.6+, CPU of orphans too short-lived to sample goes to the program that started them, not to `systemd` or init.
+- On Linux 6.6+, CPU used by short-lived orphans goes to the program that started them, not to `systemd` or init.
 
 ## 0.1.1
 
-- Programs launched by session wrappers (`dbus-run-session`, `xinit`, `pkexec`, ...) and Wayland compositors count as their own programs, not the wrapper's.
+- Programs started by session wrappers (`dbus-run-session`, `xinit`, `pkexec`) and Wayland compositors count as programs of their own.
 
 ## 0.1.0 - Initial release
 
-- `pw record` samples every process at a fixed interval (`-i`, 5 seconds by default) and keeps per-program CPU, memory, and process counts by the minute, folding hours older than a day into one bucket each.
-- `pw` reports the top programs by average RAM or CPU time over the past hour, or up to 30 days (`-p`), with each program's peak CPU, peak RAM, and most processes at once.
-- A program counts every process it started that did not start a program of its own, judged by process groups, launchers, and pid reuse.
-- CPU of children that start and exit between two samples is credited to the program that ran them, on Linux, macOS, and FreeBSD.
-- RAM is the memory a process holds alone: resident anonymous memory on Linux, the physical footprint on macOS, the private working set on Windows, and the resident set on FreeBSD.
-- The recorder can be stopped at any moment, even with SIGKILL, without losing the minute in progress, and a second recorder on the same folder is refused.
-- `pw --clear` deletes every recording, and a running recorder records on from that moment.
-- Portable mode: a `data` folder beside `pw` keeps the recordings there.
-- Releases for Linux (a static binary, `.deb`, and `.rpm`), macOS (Intel and Apple Silicon), FreeBSD, and Windows (a zip, a portable zip, and an installer).
+- `pw record` samples every process and keeps per-program CPU, RAM, and process counts by the minute.
+- `pw` shows the top programs by RAM or CPU over the past hour, or up to 30 days, with their peaks.
+- A program includes every process it started, so a browser's helpers count toward the browser.
+- CPU of children too short-lived to sample counts toward the program that ran them, on Linux, macOS, and FreeBSD.
+- RAM counts only memory a process does not share, so shared libraries are not counted twice.
+- The recorder survives being killed at any moment, and only one recorder writes to a folder.
+- `pw --clear` deletes every recording.
+- Portable mode keeps recordings in a `data` folder beside `pw`.
+- Releases for Linux, macOS, FreeBSD, and Windows.

@@ -121,7 +121,7 @@ such events to an unprivileged process, so there, an orphan no sample saw
 counts toward its reaper; on macOS that reaper is `launchd`, whose counters
 only root can read, so a non-root recorder misses that CPU entirely.
 
-## What RAM means
+## How Process Watch Measures RAM
 
 Summing resident memory across a program's processes would count shared
 libraries once per process. Each platform reports what a process holds alone:
