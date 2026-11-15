@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.1
+
+- Programs launched by session wrappers (`dbus-run-session`, `xinit`, `pkexec`, ...) and Wayland compositors count as their own programs, not the wrapper's.
+
 ## 0.1.0 - Initial release
 
 - `pw record` samples every process at a fixed interval (`-i`, 5 seconds by default) and keeps per-program CPU, memory, and process counts by the minute, folding hours older than a day into one bucket each.

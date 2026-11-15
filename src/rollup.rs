@@ -3,9 +3,9 @@ use std::collections::HashMap;
 use crate::snapshot::Proc;
 
 /// Programs whose children are programs of their own: init systems, service
-/// managers, display and session managers, desktop shells, sandboxes, command
-/// wrappers, and, on Windows, where there are no process groups, the shells
-/// and terminals too. Sorted, lowercase.
+/// managers, display and session managers, compositors, desktop shells,
+/// sandboxes, command wrappers, and, on Windows, where there are no process
+/// groups, the shells and terminals too. Sorted, lowercase.
 const LAUNCHERS: &[&str] = &[
     "budgie-panel",
     "bwrap",
@@ -19,14 +19,19 @@ const LAUNCHERS: &[&str] = &[
     "dbus-broker",
     "dbus-broker-launch",
     "dbus-daemon",
+    "dbus-launch",
+    "dbus-run-session",
     "doas",
     "dumb-init",
     "env",
     "explorer",
+    "firejail",
     "flatpak-session-helper",
+    "gdm",
     "gdm-session-worker",
     "gdm-wayland-session",
     "gdm-x-session",
+    "gdm3",
     "gnome-session-binary",
     "gnome-shell",
     "hyprland",
@@ -37,6 +42,9 @@ const LAUNCHERS: &[&str] = &[
     "klauncher",
     "krunner",
     "ksmserver",
+    "kwin_wayland",
+    "kwin_wayland_wrapper",
+    "labwc",
     "launchd",
     "lightdm",
     "login",
@@ -46,9 +54,11 @@ const LAUNCHERS: &[&str] = &[
     "mate-panel",
     "mate-session",
     "nice",
+    "niri",
     "nohup",
     "openbox",
     "openconsole",
+    "pkexec",
     "plasma_session",
     "plasmashell",
     "powershell",
@@ -56,14 +66,17 @@ const LAUNCHERS: &[&str] = &[
     "runit",
     "runsv",
     "runsvdir",
+    "runuser",
     "s6-supervise",
     "s6-svscan",
+    "sddm",
     "sddm-helper",
     "services",
     "setsid",
     "smss",
     "startplasma-wayland",
     "startplasma-x11",
+    "startx",
     "su",
     "sudo",
     "supervisord",
@@ -74,12 +87,14 @@ const LAUNCHERS: &[&str] = &[
     "tini",
     "upstart",
     "userinit",
+    "wayfire",
     "windowsterminal",
     "wininit",
     "winlogon",
     "xfce4-panel",
     "xfce4-session",
     "xfdesktop",
+    "xinit",
 ];
 
 fn is_launcher(name: &str) -> bool {
@@ -213,6 +228,20 @@ mod tests {
             [
                 "systemd", "kitty", "bash", "cargo", "cargo", "make", "make", "make"
             ]
+        );
+    }
+
+    #[test]
+    fn a_session_wrapper_runs_programs_of_their_own() {
+        let procs = [
+            p(3270, 1, 3270, "systemd"),
+            p(3271, 3270, 3271, "dbus-run-session"),
+            p(3272, 3271, 3271, "dbus-daemon"),
+            p(3273, 3271, 3271, "kwin_x11"),
+        ];
+        assert_eq!(
+            programs(&procs),
+            ["systemd", "dbus-run-session", "dbus-daemon", "kwin_x11"]
         );
     }
 
