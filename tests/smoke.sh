@@ -84,6 +84,15 @@ rows=$("$bin" -d "$data" -s cpu -n 3 | awk 'f { n++ } /^PROGRAM / { f = 1 } END 
 [ "$rows" -ge 1 ] && [ "$rows" -le 3 ] || fail "-n 3 shows 1 to 3 programs, got $rows"
 pass "report"
 
+"$bin" -d "$data" -t '<1tb' | grep -q '^PROGRAM ' || fail "every program is below 1 TiB of RAM"
+"$bin" -d "$data" -s cpu -t '>100000%' | grep -q '^PROGRAM ' && fail "no program is above 100000% CPU"
+"$bin" -d "$data" no-such-program-name | grep -q 'matching `no-such-program-name`' ||
+    fail "the heading names the pattern"
+status=0
+"$bin" -d "$data" -t 1gb 2>"$work/err" || status=$?
+[ "$status" -eq 2 ] && grep -q 'takes > or <' "$work/err" || fail "a threshold without > or < exits 2"
+pass "patterns and thresholds"
+
 rows=$("$bin" -d "$data" -p 1d -n 1000 | awk 'f { n++ } /^PROGRAM / { f = 1 } END { print n + 0 }')
 [ "$rows" -ge "$("$bin" -d "$data" -n 2 | awk 'f { n++ } /^PROGRAM / { f = 1 } END { print n + 0 }')" ] ||
     fail "a 24-hour period shows at least what a 1-hour one does"

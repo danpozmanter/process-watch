@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.0
+
+- `pw PATTERN` shows only programs whose name contains the pattern, ignoring case: `pw firefo` shows `firefox`.
+- `-t`/`--threshold` shows only programs above (`>`) or below (`<`) a limit on what `--sort` ranks by: average RAM in `mb`, `gb`, or `tb` (`'>1gb'`), or with `--sort cpu`, average CPU (`'>50%'`) or CPU time (`'>10m'`).
+- A report that has no program to show prints its heading without an empty table.
+
 ## 0.1.2
 
 - On Linux 6.6+, CPU of orphans too short-lived to sample goes to the program that started them, not to `systemd` or init.

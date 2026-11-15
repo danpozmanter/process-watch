@@ -10,6 +10,7 @@ mod size;
 mod snapshot;
 mod span;
 mod store;
+mod threshold;
 
 use std::process::ExitCode;
 

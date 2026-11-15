@@ -26,7 +26,7 @@ cargo                 14   23m 10s    38.6%   2280.5%    1.2 GiB    3.9 GiB
 ## Usage
 
 ```
-pw [-n N] [-s ram|cpu] [-o desc|asc] [-p SPAN] [-d DIR]
+pw [-n N] [-s ram|cpu] [-o desc|asc] [-p SPAN] [-t LIMIT] [-d DIR] [PATTERN]
 pw --clear [-d DIR]
 pw record [-i SPAN] [-r SPAN] [-d DIR]
 ```
@@ -37,12 +37,35 @@ pw record [-i SPAN] [-r SPAN] [-d DIR]
 | `-s`, `--sort` | `ram` ranks by average RAM, `cpu` by CPU time | `ram` |
 | `-o`, `--order` | `desc` shows the heaviest first, `asc` the lightest | `desc` |
 | `-p`, `--period` | how far back to look, from `1h` up to `30d` | `1h` |
+| `-t`, `--threshold` | show only programs above (`>`) or below (`<`) a limit; see below | |
+| `PATTERN` | show only programs whose name contains it, ignoring case | |
 | `--clear` | delete every recording | |
 | `-i`, `--interval` | (record) time between samples | `5s` |
 | `-r`, `--retain` | (record) how long recordings are kept, up to `30d` | `12h` |
 | `-d`, `--dir` | data folder | see below |
 
-Flags take `-n 5`, `-n5`, `--number 5`, or `--number=5`.
+Flags take `-n 5`, `-n5`, `--number 5`, or `--number=5`. A pattern that
+starts with `-`, or is the word `record`, goes after `--`: `pw -- -bin`.
+
+`pw firefo` shows `firefox`, `Firefox-esr`, and anything else whose name
+contains `firefo` in any case.
+
+A threshold measures what `--sort` ranks by:
+
+| Sort | Threshold | Compares |
+|---|---|---|
+| `ram` | `>1gb`, `<500mb`, `>1.5tb` | AVG RAM |
+| `cpu` | `>50%`, `<0.5%` | AVG CPU |
+| `cpu` | `>10m`, `<1h30m` | CPU TIME |
+
+Sizes are binary, as the report shows them: `1gb` is 1024 MiB, the `1.0 GiB`
+of the AVG RAM column; `mib`, `gib`, and `tib` mean the same. Quote the
+threshold, since a shell takes a bare `>` or `<` as a redirection:
+
+```
+pw -t '>1gb'
+pw firefox -s cpu --threshold '>5%'
+```
 
 Run the recorder as a background service (below). A report covers only time
 the recorder was running, and its header says how much of the period that was.

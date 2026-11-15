@@ -5,6 +5,7 @@ use anyhow::{Result, bail};
 
 use crate::span::{self, NS_PER_MS};
 use crate::store::{self, Bucket, RecorderLock, Usage};
+use crate::threshold::Threshold;
 use crate::{data_dir, size};
 
 /// The measure programs are ranked by.
@@ -28,6 +29,9 @@ pub struct ReportOptions {
     pub order: Order,
     pub sort: SortKey,
     pub period_ms: i64,
+    /// Shows only programs whose name contains this, ignoring case.
+    pub pattern: Option<String>,
+    pub threshold: Option<Threshold>,
     pub dir: Option<PathBuf>,
 }
 
@@ -57,7 +61,7 @@ pub fn report(opts: &ReportOptions) -> Result<String> {
     if buckets.is_empty() {
         bail!(nothing_recorded(&dir, opts.period_ms));
     }
-    let summary = summarize(&buckets);
+    let summary = summarize(&buckets).filtered(opts);
     let ranked = rank(summary.rows.clone(), opts.sort, opts.order, opts.number);
     Ok(render(&summary, &ranked, opts))
 }
@@ -101,6 +105,23 @@ fn summarize(buckets: &[Bucket]) -> Summary {
     }
 }
 
+impl Summary {
+    /// The summary keeping only the programs the pattern and threshold admit.
+    fn filtered(mut self, opts: &ReportOptions) -> Self {
+        let pattern = opts.pattern.as_deref().map(str::to_lowercase);
+        let covered_ms = self.covered_ms.max(1);
+        self.rows.retain(|row| {
+            pattern
+                .as_deref()
+                .is_none_or(|p| row.name.to_lowercase().contains(p))
+                && opts
+                    .threshold
+                    .is_none_or(|t| t.admits(&row.usage, covered_ms))
+        });
+        self
+    }
+}
+
 /// The row's ranking measure, then the other measure to break ties.
 fn ranking_key(row: &Row, sort: SortKey) -> (i64, i64) {
     let Usage {
@@ -129,7 +150,8 @@ fn rank(mut rows: Vec<Row>, sort: SortKey, order: Order, number: usize) -> Vec<R
     rows
 }
 
-/// The two header lines naming the period, the coverage, and the ranking.
+/// The two header lines naming the period, the coverage, the ranking, and
+/// any pattern and threshold the programs were chosen by.
 fn heading(summary: &Summary, shown: usize, opts: &ReportOptions) -> String {
     let measure = match opts.sort {
         SortKey::Ram => "RAM",
@@ -139,9 +161,16 @@ fn heading(summary: &Summary, shown: usize, opts: &ReportOptions) -> String {
         Order::Desc => "highest",
         Order::Asc => "lowest",
     };
+    let mut chosen_by = String::new();
+    if let Some(pattern) = &opts.pattern {
+        chosen_by.push_str(&format!(", matching `{pattern}`"));
+    }
+    if let Some(threshold) = opts.threshold {
+        chosen_by.push_str(&format!(", with {}", threshold.describe()));
+    }
     format!(
         "Past {}: {} recorded, {} CPUs (100% CPU = one core)\n\
-         Top {shown} of {} programs by {measure}, {direction} first\n\n",
+         Top {shown} of {} programs by {measure}, {direction} first{chosen_by}\n\n",
         span::format(opts.period_ms),
         span::format(summary.covered_ms),
         summary.cpus,
@@ -193,12 +222,17 @@ fn align(table: &[Vec<String>]) -> String {
     out
 }
 
-/// The ranked rows as an aligned table under a header naming the period.
+/// The ranked rows as an aligned table under a header naming the period;
+/// with no rows, the header alone.
 fn render(summary: &Summary, ranked: &[Row], opts: &ReportOptions) -> String {
+    let heading = heading(summary, ranked.len(), opts);
+    if ranked.is_empty() {
+        return format!("{}\n", heading.trim_end());
+    }
     let covered_ms = summary.covered_ms.max(1);
     let mut table = vec![COLUMNS.map(str::to_owned).to_vec()];
     table.extend(ranked.iter().map(|row| cells(row, covered_ms)));
-    heading(summary, ranked.len(), opts) + &align(&table)
+    heading + &align(&table)
 }
 
 #[cfg(test)]
@@ -230,6 +264,8 @@ mod tests {
             order: Order::Desc,
             sort: SortKey::Ram,
             period_ms: 3_600_000,
+            pattern: None,
+            threshold: None,
             dir,
         }
     }
@@ -303,6 +339,69 @@ mod tests {
             ..options(None)
         };
         assert!(heading(&summary, 0, &opts).contains("Top 0 of 0 programs by CPU, lowest first"));
+    }
+
+    #[test]
+    fn patterns_match_any_part_of_a_name_ignoring_case() {
+        let summary = summarize(&decode(
+            "B\t1\t60000\t60000\t4\n\
+             G\t0\t0\t60000\t1\t1\tfirefox-bin\n\
+             G\t0\t0\t60000\t1\t1\tFirefox\n\
+             G\t0\t0\t60000\t1\t1\tfire\n",
+        ));
+        let opts = ReportOptions {
+            pattern: Some("FIREFO".to_owned()),
+            ..options(None)
+        };
+        assert_eq!(
+            names(&summary.filtered(&opts).rows),
+            ["Firefox", "firefox-bin"]
+        );
+    }
+
+    #[test]
+    fn thresholds_keep_programs_on_their_side_of_the_limit() {
+        let summary = summarize(&decode(
+            "B\t1\t60000\t60000\t4\n\
+             G\t0\t0\t120000000\t2000\t1\tbig\n\
+             G\t0\t0\t60000000\t1000\t1\tsmall\n",
+        ));
+        let opts = ReportOptions {
+            threshold: Threshold::parse("<0.001mb", SortKey::Ram),
+            ..options(None)
+        };
+        let kept = summary.filtered(&opts);
+        assert_eq!(names(&kept.rows), ["small"]);
+        assert!(heading(&kept, 1, &opts).contains(
+            "Top 1 of 1 programs by RAM, highest first, with average RAM below 1.0 KiB\n"
+        ));
+    }
+
+    #[test]
+    fn a_report_with_no_program_to_show_has_no_table() {
+        let summary = summarize(&[]);
+        let opts = ReportOptions {
+            pattern: Some("zzz".to_owned()),
+            ..options(None)
+        };
+        assert_eq!(
+            render(&summary, &[], &opts),
+            "Past 1h: 0ms recorded, 1 CPUs (100% CPU = one core)\n\
+             Top 0 of 0 programs by RAM, highest first, matching `zzz`\n"
+        );
+    }
+
+    #[test]
+    fn the_heading_names_the_pattern_then_the_threshold() {
+        let opts = ReportOptions {
+            pattern: Some("fire".to_owned()),
+            threshold: Threshold::parse(">50%", SortKey::Cpu),
+            sort: SortKey::Cpu,
+            ..options(None)
+        };
+        assert!(heading(&summarize(&[]), 0, &opts).contains(
+            "programs by CPU, highest first, matching `fire`, with average CPU above 50%\n"
+        ));
     }
 
     #[test]

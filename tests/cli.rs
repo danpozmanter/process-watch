@@ -165,6 +165,41 @@ fn a_report_ranks_what_was_recorded() {
 }
 
 #[test]
+fn a_report_shows_only_programs_matching_its_pattern_and_threshold() {
+    let scratch = Scratch::new("filter");
+    let data = scratch.path("data");
+    fs::create_dir_all(&data).unwrap();
+    let gib = 1 << 30;
+    let text = minute_of(&[
+        ("firefox", 2 * gib),
+        ("Firefox-esr", gib / 2),
+        ("thunderbird", 3 * gib),
+    ]);
+    fs::write(data.join("current.tsv"), text).unwrap();
+    let dir = data.to_str().unwrap();
+
+    let matching = stdout(&run(&scratch.0, &["-d", dir, "FIREFO"]));
+    let rows = table_rows(&matching);
+    assert_eq!(rows.len(), 2, "{matching}");
+    assert!(rows[0].starts_with("firefox "), "{matching}");
+    assert!(rows[1].starts_with("Firefox-esr "), "{matching}");
+
+    let heavy = stdout(&run(&scratch.0, &["-d", dir, "fire", "-t", ">1gb"]));
+    assert!(heavy.contains(", matching `fire`, with average RAM above 1.0 GiB\n"));
+    let rows = table_rows(&heavy);
+    assert_eq!(rows.len(), 1, "{heavy}");
+    assert!(rows[0].starts_with("firefox "), "{heavy}");
+
+    let light = stdout(&run(&scratch.0, &["-d", dir, "--threshold=<1gb"]));
+    let rows = table_rows(&light);
+    assert_eq!(rows.len(), 1, "{light}");
+    assert!(rows[0].starts_with("Firefox-esr "), "{light}");
+
+    let busy = run(&scratch.0, &["-d", dir, "-s", "cpu", "-t", ">1gb"]);
+    assert_eq!(busy.status.code(), Some(2));
+}
+
+#[test]
 fn clearing_removes_what_a_report_would_show() {
     let scratch = Scratch::new("clear");
     let data = scratch.path("data");

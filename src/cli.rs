@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use crate::recorder::RecordOptions;
 use crate::report::{Order, ReportOptions, SortKey};
 use crate::span::{self, DAY_MS, HOUR_MS, SECOND_MS};
+use crate::threshold::Threshold;
 
 /// The longest the recorder keeps recordings, and so the longest period a report covers.
 const MAX_RETAIN_MS: i64 = 30 * DAY_MS;
@@ -12,15 +13,21 @@ pub const USAGE: &str = "\
 pw - top programs by RAM or CPU over the past hours
 
 Usage:
-  pw [OPTIONS]            report on what the recorder saw
+  pw [OPTIONS] [PATTERN]  report on what the recorder saw
   pw --clear [-d PATH]    delete every recording
   pw record [OPTIONS]     sample every process until stopped
 
 Report options:
+  PATTERN                show only programs whose name contains it, in any case
   -n, --number N         programs to show (default 10)
   -s, --sort ram|cpu     rank by average RAM or by CPU time (default ram)
   -o, --order desc|asc   highest or lowest first (default desc)
   -p, --period SPAN      how far back to look, e.g. 6h, 2d, up to 30d (default 1h)
+  -t, --threshold LIMIT  show only programs above (>) or below (<) a limit on
+                         what --sort ranks by: average RAM in mb, gb, or tb,
+                         e.g. '>1gb'; with --sort cpu, average CPU or CPU
+                         time, e.g. '>50%' or '>10m'. Quote it: a shell takes
+                         a bare > or < as a redirection
 
 Record options:
   -i, --interval SPAN    time between samples, e.g. 5s, 30s (default 5s)
@@ -77,6 +84,7 @@ enum Flag {
     Sort,
     Order,
     Period,
+    Threshold,
     Interval,
     Retain,
     Dir,
@@ -89,6 +97,7 @@ impl Flag {
             "-s" | "--sort" => Flag::Sort,
             "-o" | "--order" => Flag::Order,
             "-p" | "--period" => Flag::Period,
+            "-t" | "--threshold" => Flag::Threshold,
             "-i" | "--interval" => Flag::Interval,
             "-r" | "--retain" => Flag::Retain,
             "-d" | "--dir" => Flag::Dir,
@@ -99,7 +108,9 @@ impl Flag {
 
     fn mode(self) -> Option<Mode> {
         match self {
-            Flag::Number | Flag::Sort | Flag::Order | Flag::Period => Some(Mode::Report),
+            Flag::Number | Flag::Sort | Flag::Order | Flag::Period | Flag::Threshold => {
+                Some(Mode::Report)
+            }
             Flag::Interval | Flag::Retain => Some(Mode::Record),
             Flag::Dir => None,
         }
@@ -116,6 +127,8 @@ struct Parsed {
     report: ReportOptions,
     record: RecordOptions,
     dir: Option<PathBuf>,
+    /// The threshold flag as given and its value, read once the sort is known.
+    threshold: Option<(String, String)>,
     clear: bool,
     /// The last report option given, which `--clear` refuses.
     report_flag: Option<String>,
@@ -130,6 +143,8 @@ impl Parsed {
                 order: Order::Desc,
                 sort: SortKey::Ram,
                 period_ms: HOUR_MS,
+                pattern: None,
+                threshold: None,
                 dir: None,
             },
             record: RecordOptions {
@@ -138,9 +153,29 @@ impl Parsed {
                 dir: None,
             },
             dir: None,
+            threshold: None,
             clear: false,
             report_flag: None,
         }
+    }
+
+    /// Reads one argument: a flag, or in a report, the pattern.
+    fn take(&mut self, arg: String, rest: &mut impl Iterator<Item = String>) -> Result<(), String> {
+        if self.mode == Mode::Report && !arg.starts_with('-') {
+            return self.take_pattern(arg);
+        }
+        self.take_flag(&arg, rest)
+    }
+
+    fn take_pattern(&mut self, pattern: String) -> Result<(), String> {
+        if let Some(first) = &self.report.pattern {
+            return Err(format!(
+                "pw takes one pattern; got `{first}` and `{pattern}`"
+            ));
+        }
+        self.report_flag = Some(pattern.clone());
+        self.report.pattern = Some(pattern);
+        Ok(())
     }
 
     /// Reads the flag in `arg`, taking its value from `arg` itself or from the next argument.
@@ -174,6 +209,7 @@ impl Parsed {
             Flag::Sort => self.report.sort = sort_arg(name, value)?,
             Flag::Order => self.report.order = order_arg(name, value)?,
             Flag::Period => self.report.period_ms = span_arg(name, value, HOUR_MS, MAX_RETAIN_MS)?,
+            Flag::Threshold => self.threshold = Some((name.to_owned(), value.to_owned())),
             Flag::Interval => self.record.interval_ms = span_arg(name, value, SECOND_MS, HOUR_MS)?,
             Flag::Retain => self.record.retain_ms = span_arg(name, value, HOUR_MS, MAX_RETAIN_MS)?,
             Flag::Dir => self.dir = Some(PathBuf::from(value)),
@@ -190,6 +226,10 @@ impl Parsed {
         }
         Ok(match self.mode {
             Mode::Report => Command::Report(ReportOptions {
+                threshold: self
+                    .threshold
+                    .map(|(flag, value)| threshold_arg(&flag, &value, self.report.sort))
+                    .transpose()?,
                 dir: self.dir,
                 ..self.report
             }),
@@ -214,7 +254,12 @@ pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command, Str
             "-h" | "--help" => return Ok(Command::Help),
             "-V" | "--version" => return Ok(Command::Version),
             "--clear" if mode == Mode::Report => parsed.clear = true,
-            _ => parsed.take_flag(&arg, &mut args)?,
+            "--" if mode == Mode::Report => {
+                for pattern in args.by_ref() {
+                    parsed.take_pattern(pattern)?;
+                }
+            }
+            _ => parsed.take(arg, &mut args)?,
         }
     }
     parsed.into_command()
@@ -259,6 +304,18 @@ fn order_arg(flag: &str, value: &str) -> Result<Order, String> {
     }
 }
 
+fn threshold_arg(flag: &str, value: &str, sort: SortKey) -> Result<Threshold, String> {
+    Threshold::parse(value, sort).ok_or_else(|| match sort {
+        SortKey::Ram => {
+            format!("{flag} takes > or < and a size in mb, gb, or tb, such as >1gb; got `{value}`")
+        }
+        SortKey::Cpu => format!(
+            "{flag} with --sort cpu takes > or < and a percentage or a CPU time, \
+             such as >50% or >10m; got `{value}`"
+        ),
+    })
+}
+
 fn span_arg(flag: &str, value: &str, min_ms: i64, max_ms: i64) -> Result<i64, String> {
     let ms = span::parse(value).ok_or_else(|| {
         format!("{flag} takes a span with units, such as 90s, 30m, 2h, or 1d; got `{value}`")
@@ -294,6 +351,8 @@ mod tests {
         assert_eq!(opts.sort, SortKey::Ram);
         assert_eq!(opts.order, Order::Desc);
         assert_eq!(opts.period_ms, 3_600_000);
+        assert_eq!(opts.pattern, None);
+        assert_eq!(opts.threshold, None);
         assert_eq!(opts.dir, None);
     }
 
@@ -395,10 +454,7 @@ mod tests {
         assert_eq!(error_of(&["-p", "30m"]), "-p must be at least 1h");
         assert_eq!(error_of(&["--period=31d"]), "--period can be at most 30d");
         assert_eq!(error_of(&["-n"]), "-n needs a value");
-        assert_eq!(
-            error_of(&["recrod"]),
-            "pw does not take `recrod`; see --help"
-        );
+        assert_eq!(error_of(&["-x"]), "pw does not take `-x`; see --help");
     }
 
     #[test]
@@ -417,6 +473,85 @@ mod tests {
         let opts = report_of(&["--sort", "Memory", "--order", "ASC"]);
         assert_eq!(opts.sort, SortKey::Ram);
         assert_eq!(opts.order, Order::Asc);
+    }
+
+    #[test]
+    fn a_bare_argument_is_the_pattern_wherever_it_stands() {
+        assert_eq!(report_of(&["firefo"]).pattern.as_deref(), Some("firefo"));
+        let opts = report_of(&["-n", "3", "Fire", "-s", "cpu"]);
+        assert_eq!(opts.pattern.as_deref(), Some("Fire"));
+        assert_eq!(opts.number, 3);
+        assert_eq!(opts.sort, SortKey::Cpu);
+    }
+
+    #[test]
+    fn a_double_dash_lets_a_pattern_start_with_a_dash_or_name_record() {
+        assert_eq!(report_of(&["--", "-bin"]).pattern.as_deref(), Some("-bin"));
+        assert_eq!(
+            report_of(&["-n", "2", "--", "record"]).pattern.as_deref(),
+            Some("record")
+        );
+    }
+
+    #[test]
+    fn only_a_report_takes_one_pattern() {
+        assert_eq!(
+            error_of(&["a", "b"]),
+            "pw takes one pattern; got `a` and `b`"
+        );
+        assert_eq!(
+            error_of(&["a", "--", "b"]),
+            "pw takes one pattern; got `a` and `b`"
+        );
+        assert_eq!(
+            error_of(&["record", "firefox"]),
+            "pw record does not take `firefox`; see --help"
+        );
+        assert_eq!(
+            error_of(&["--clear", "firefox"]),
+            "--clear takes no report options; got `firefox`"
+        );
+    }
+
+    #[test]
+    fn thresholds_measure_what_the_sort_ranks_by_wherever_it_is_given() {
+        let ram = report_of(&["-t", ">1gb"]).threshold.map(|t| t.describe());
+        assert_eq!(ram.as_deref(), Some("average RAM above 1.0 GiB"));
+        let cpu = report_of(&["--threshold=<50%", "-s", "cpu"]).threshold;
+        assert_eq!(
+            cpu.map(|t| t.describe()).as_deref(),
+            Some("average CPU below 50%")
+        );
+        let time = report_of(&["-s", "cpu", "-t>10m"]).threshold;
+        assert_eq!(
+            time.map(|t| t.describe()).as_deref(),
+            Some("CPU time above 10m")
+        );
+    }
+
+    #[test]
+    fn bad_thresholds_name_what_the_sort_takes() {
+        assert_eq!(
+            error_of(&["-t", "1gb"]),
+            "-t takes > or < and a size in mb, gb, or tb, such as >1gb; got `1gb`"
+        );
+        assert_eq!(
+            error_of(&["--threshold", ">50%"]),
+            "--threshold takes > or < and a size in mb, gb, or tb, such as >1gb; got `>50%`"
+        );
+        assert_eq!(
+            error_of(&["-t", ">1gb", "--sort", "cpu"]),
+            "-t with --sort cpu takes > or < and a percentage or a CPU time, \
+             such as >50% or >10m; got `>1gb`"
+        );
+        assert_eq!(
+            error_of(&["--clear", "-t", ">1gb"]),
+            "--clear takes no report options; got `-t`"
+        );
+        assert_eq!(
+            error_of(&["record", "-t", ">1gb"]),
+            "pw record does not take `-t`; see --help"
+        );
     }
 
     #[test]
