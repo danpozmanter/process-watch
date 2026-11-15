@@ -1,5 +1,6 @@
-use crate::report::SortKey;
 use crate::size;
+use crate::sort_key::{SortKey, Unit};
+use crate::span::{self, NS_PER_MS};
 use crate::store::Usage;
 
 const MIB: f64 = 1024.0 * 1024.0;
@@ -11,26 +12,19 @@ pub enum Bound {
     Below,
 }
 
-/// The peak a threshold compares, and its limit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Limit {
-    /// Peak RAM, in bytes.
-    PeakRam(i64),
-    /// Peak CPU, in hundredths of a percent of one core.
-    PeakCpu(i64),
-}
-
-/// A limit a program's peak must be above or below for a report to show it.
+/// A limit on one report column that a program must be above or below to be shown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Threshold {
     pub bound: Bound,
-    pub limit: Limit,
+    pub key: SortKey,
+    /// The limit in the key's unit: bytes, hundredths of a percent, milliseconds, or a count.
+    pub limit: i64,
 }
 
 impl Threshold {
-    /// Reads `>1gb` or `<500mb` when ranking by RAM, and `>50%` when ranking
-    /// by CPU; sizes are binary, so `1gb` is 1024 MiB.
-    pub fn parse(text: &str, sort: SortKey) -> Option<Self> {
+    /// Reads `>` or `<` and an amount in `key`'s unit: a binary size (`1gb` is
+    /// 1024 MiB), a percentage of one core, a span, or a count.
+    pub fn parse(text: &str, key: SortKey) -> Option<Self> {
         let mut chars = text.chars();
         let bound = match chars.next()? {
             '>' => Bound::Above,
@@ -38,26 +32,35 @@ impl Threshold {
             _ => return None,
         };
         let amount = chars.as_str().trim();
-        let limit = match sort {
-            SortKey::Ram => Limit::PeakRam(parse_size(amount)?),
-            SortKey::Cpu => {
-                let percent = amount.strip_suffix('%')?.trim_end();
-                Limit::PeakCpu(scaled(percent, 100.0)?)
-            }
+        let limit = match key.unit() {
+            Unit::Size => parse_size(amount)?,
+            Unit::Percent => scaled(amount.strip_suffix('%')?.trim_end(), 100.0)?,
+            Unit::Span => span::parse(amount)?,
+            Unit::Count => i64::from(amount.parse::<u32>().ok()?),
         };
-        Some(Self { bound, limit })
+        Some(Self { bound, key, limit })
     }
 
-    /// Whether `usage`'s peak falls on the threshold's side of its limit.
-    pub fn admits(&self, usage: &Usage) -> bool {
-        // Peak CPU is kept in thousandths of a core, ten times coarser than the limit.
-        let (peak, limit) = match self.limit {
-            Limit::PeakRam(bytes) => (usage.peak_mem, bytes),
-            Limit::PeakCpu(hundredths) => (usage.peak_cpu_permille.saturating_mul(10), hundredths),
+    /// Whether `usage`, recorded over `covered_ms`, falls on the threshold's side of its limit.
+    pub fn admits(&self, usage: &Usage, covered_ms: i64) -> bool {
+        let covered_ns = i128::from(covered_ms) * i128::from(NS_PER_MS);
+        let limit = i128::from(self.limit);
+        // Each measure and its limit are brought to a common scale, so the
+        // comparison is exact.
+        let (measure, limit) = match self.key {
+            SortKey::PeakRam => (i128::from(usage.peak_mem), limit),
+            SortKey::AvgRam => (
+                i128::from(usage.mem_byte_ms),
+                limit * i128::from(covered_ms),
+            ),
+            SortKey::PeakCpu => (i128::from(usage.peak_cpu_permille) * 10, limit),
+            SortKey::AvgCpu => (i128::from(usage.cpu_ns) * 10_000, limit * covered_ns),
+            SortKey::CpuTime => (i128::from(usage.cpu_ns), limit * i128::from(NS_PER_MS)),
+            SortKey::Procs => (i128::from(usage.peak_procs), limit),
         };
         match self.bound {
-            Bound::Above => peak > limit,
-            Bound::Below => peak < limit,
+            Bound::Above => measure > limit,
+            Bound::Below => measure < limit,
         }
     }
 
@@ -67,12 +70,13 @@ impl Threshold {
             Bound::Above => "above",
             Bound::Below => "below",
         };
-        match self.limit {
-            Limit::PeakRam(bytes) => format!("peak RAM {bound} {}", size::format(bytes)),
-            Limit::PeakCpu(hundredths) => {
-                format!("peak CPU {bound} {}", format_percent(hundredths))
-            }
-        }
+        let limit = match self.key.unit() {
+            Unit::Size => size::format(self.limit),
+            Unit::Percent => format_percent(self.limit),
+            Unit::Span => span::format(self.limit),
+            Unit::Count => self.limit.to_string(),
+        };
+        format!("{} {bound} {limit}", self.key.label())
     }
 }
 
@@ -117,12 +121,62 @@ mod tests {
 
     const GIB: i64 = 1 << 30;
 
-    fn ram(text: &str) -> Option<Threshold> {
-        Threshold::parse(text, SortKey::Ram)
+    fn parse(key: SortKey, text: &str) -> Option<i64> {
+        Threshold::parse(text, key).map(|t| t.limit)
     }
 
-    fn cpu(text: &str) -> Option<Threshold> {
-        Threshold::parse(text, SortKey::Cpu)
+    fn admits(key: SortKey, text: &str, usage: Usage) -> bool {
+        Threshold::parse(text, key).unwrap().admits(&usage, 60_000)
+    }
+
+    #[test]
+    fn sizes_are_binary_in_any_case() {
+        let ram = |text| parse(SortKey::PeakRam, text);
+        assert_eq!(ram(">1gb"), Some(GIB));
+        assert_eq!(ram(">1GB"), Some(GIB));
+        assert_eq!(ram("> 1.5 GiB"), Some(GIB + GIB / 2));
+        assert_eq!(ram(">500mb"), Some(500 << 20));
+        assert_eq!(ram(">2tb"), Some(2 << 40));
+        assert_eq!(parse(SortKey::AvgRam, "<1gb"), Some(GIB));
+        let below = Threshold::parse("<1gb", SortKey::PeakRam).map(|t| t.bound);
+        assert_eq!(below, Some(Bound::Below));
+    }
+
+    #[test]
+    fn sizes_need_a_bound_a_number_and_a_unit() {
+        for text in [
+            "1gb",
+            "=1gb",
+            ">",
+            ">gb",
+            ">1",
+            ">1kb",
+            ">1g",
+            ">-1gb",
+            ">1e3gb",
+            ">.5gb",
+            ">1.gbx",
+            ">inf gb",
+            ">50%",
+            ">10m",
+            "",
+            ">99999999tb",
+        ] {
+            assert_eq!(parse(SortKey::PeakRam, text), None, "{text}");
+        }
+    }
+
+    #[test]
+    fn each_key_takes_its_own_unit() {
+        assert_eq!(parse(SortKey::PeakCpu, ">50%"), Some(5000));
+        assert_eq!(parse(SortKey::AvgCpu, "<12.5 %"), Some(1250));
+        assert_eq!(parse(SortKey::CpuTime, ">1h30m"), Some(5_400_000));
+        assert_eq!(parse(SortKey::Procs, ">20"), Some(20));
+        assert_eq!(parse(SortKey::PeakCpu, ">1gb"), None);
+        assert_eq!(parse(SortKey::PeakCpu, ">50"), None);
+        assert_eq!(parse(SortKey::CpuTime, ">50%"), None);
+        assert_eq!(parse(SortKey::Procs, ">2.5"), None);
+        assert_eq!(parse(SortKey::Procs, ">-1"), None);
     }
 
     fn usage(peak_cpu_permille: i64, peak_mem: i64) -> Usage {
@@ -134,67 +188,51 @@ mod tests {
     }
 
     #[test]
-    fn ram_thresholds_take_binary_sizes_in_any_case() {
-        let above = |limit| {
-            Some(Threshold {
-                bound: Bound::Above,
-                limit: Limit::PeakRam(limit),
-            })
+    fn peaks_compare_strictly() {
+        assert!(!admits(SortKey::PeakRam, ">1gb", usage(0, GIB)));
+        assert!(admits(SortKey::PeakRam, ">1gb", usage(0, GIB + 1)));
+        assert!(!admits(SortKey::PeakRam, "<1gb", usage(0, GIB)));
+        assert!(admits(SortKey::PeakRam, "<1gb", usage(0, GIB - 1)));
+        assert!(admits(SortKey::PeakCpu, ">200%", usage(2500, 0)));
+        assert!(!admits(SortKey::PeakCpu, ">250%", usage(2500, 0)));
+        assert!(admits(SortKey::PeakCpu, ">249.95%", usage(2500, 0)));
+        assert!(!admits(SortKey::PeakCpu, "<250%", usage(2500, 0)));
+    }
+
+    #[test]
+    fn averages_and_totals_compare_over_the_recorded_time() {
+        // Over a minute: half a GiB on average, and thirty seconds of CPU, 50% of one core.
+        let used = Usage {
+            cpu_ns: 30_000_000_000,
+            mem_byte_ms: GIB / 2 * 60_000,
+            peak_procs: 4,
+            ..Usage::default()
         };
-        assert_eq!(ram(">1gb"), above(GIB));
-        assert_eq!(ram(">1GB"), above(GIB));
-        assert_eq!(ram("> 1.5 GiB"), above(GIB + GIB / 2));
-        assert_eq!(ram(">500mb"), above(500 << 20));
-        assert_eq!(ram(">2tb"), above(2 << 40));
-        assert_eq!(ram("<1gb").map(|t| t.bound), Some(Bound::Below));
-    }
-
-    #[test]
-    fn ram_thresholds_need_a_bound_a_number_and_a_unit() {
-        for text in [
-            "1gb", "=1gb", ">", ">gb", ">1", ">1kb", ">1g", ">-1gb", ">1e3gb", ">.5gb", ">1.gbx",
-            ">inf gb", ">50%", ">10m", "",
-        ] {
-            assert_eq!(ram(text), None, "{text}");
-        }
-        assert_eq!(ram(">99999999tb"), None);
-    }
-
-    #[test]
-    fn cpu_thresholds_take_a_percentage_of_one_core() {
-        assert_eq!(cpu(">50%").map(|t| t.limit), Some(Limit::PeakCpu(5000)));
-        assert_eq!(cpu("<12.5 %").map(|t| t.limit), Some(Limit::PeakCpu(1250)));
-        assert_eq!(cpu(">250%").map(|t| t.limit), Some(Limit::PeakCpu(25_000)));
-        assert_eq!(cpu(">1gb"), None);
-        assert_eq!(cpu(">10m"), None);
-        assert_eq!(cpu(">50"), None);
-    }
-
-    #[test]
-    fn ram_thresholds_compare_peak_ram_strictly() {
-        let above = ram(">1gb").unwrap();
-        let below = ram("<1gb").unwrap();
-        assert!(!above.admits(&usage(0, GIB)));
-        assert!(above.admits(&usage(0, GIB + 1)));
-        assert!(!below.admits(&usage(0, GIB)));
-        assert!(below.admits(&usage(0, GIB - 1)));
-    }
-
-    #[test]
-    fn cpu_thresholds_compare_peak_cpu_strictly() {
-        let spike = usage(2500, 0);
-        assert!(cpu(">200%").unwrap().admits(&spike));
-        assert!(!cpu(">250%").unwrap().admits(&spike));
-        assert!(cpu(">249.95%").unwrap().admits(&spike));
-        assert!(cpu("<250.01%").unwrap().admits(&spike));
-        assert!(!cpu("<250%").unwrap().admits(&spike));
+        assert!(admits(SortKey::AvgRam, ">511mb", used));
+        assert!(!admits(SortKey::AvgRam, ">512mb", used));
+        assert!(admits(SortKey::AvgCpu, ">49.9%", used));
+        assert!(!admits(SortKey::AvgCpu, ">50%", used));
+        assert!(admits(SortKey::CpuTime, ">29s", used));
+        assert!(!admits(SortKey::CpuTime, ">30s", used));
+        assert!(admits(SortKey::Procs, ">3", used));
+        assert!(!admits(SortKey::Procs, ">4", used));
     }
 
     #[test]
     fn thresholds_describe_themselves_in_report_units() {
-        assert_eq!(ram(">1gb").unwrap().describe(), "peak RAM above 1.0 GiB");
-        assert_eq!(cpu("<50%").unwrap().describe(), "peak CPU below 50%");
-        assert_eq!(cpu(">12.5%").unwrap().describe(), "peak CPU above 12.5%");
-        assert_eq!(cpu(">0.05%").unwrap().describe(), "peak CPU above 0.05%");
+        let describe = |key, text| Threshold::parse(text, key).unwrap().describe();
+        assert_eq!(describe(SortKey::PeakRam, ">1gb"), "peak RAM above 1.0 GiB");
+        assert_eq!(describe(SortKey::PeakCpu, "<50%"), "peak CPU below 50%");
+        assert_eq!(
+            describe(SortKey::AvgCpu, ">12.5%"),
+            "average CPU above 12.5%"
+        );
+        assert_eq!(
+            describe(SortKey::AvgRam, "<512mb"),
+            "average RAM below 512.0 MiB"
+        );
+        assert_eq!(describe(SortKey::PeakCpu, ">0.05%"), "peak CPU above 0.05%");
+        assert_eq!(describe(SortKey::CpuTime, ">90m"), "CPU time above 1h 30m");
+        assert_eq!(describe(SortKey::Procs, ">20"), "process count above 20");
     }
 }

@@ -26,7 +26,7 @@ cargo                 14   23m 10s    38.6%   2280.5%    1.2 GiB    3.9 GiB
 ## Usage
 
 ```
-pw [-n N] [-s ram|cpu] [-o desc|asc] [-p SPAN] [-t LIMIT] [-d DIR] [PATTERN]
+pw [-n N] [-s COLUMN] [-o desc|asc] [-p SPAN] [-t LIMIT] [-d DIR] [PATTERN]
 pw --clear [-d DIR]
 pw record [-i SPAN] [-r SPAN] [-d DIR]
 ```
@@ -34,10 +34,10 @@ pw record [-i SPAN] [-r SPAN] [-d DIR]
 | Flag | Meaning | Default |
 |---|---|---|
 | `-n`, `--number` | programs to show | 10 |
-| `-s`, `--sort` | `ram` ranks by peak RAM, `cpu` by peak CPU | `ram` |
+| `-s`, `--sort` | the column to rank by; see below | `peak-ram` |
 | `-o`, `--order` | `desc` shows the heaviest first, `asc` the lightest | `desc` |
 | `-p`, `--period` | how far back to look, from `1h` up to `30d` | `1h` |
-| `-t`, `--threshold` | show only programs whose peak is above (`>`) or below (`<`) a limit; see below | |
+| `-t`, `--threshold` | show only programs above (`>`) or below (`<`) a limit on the `--sort` column; see below | |
 | `PATTERN` | show only programs whose name contains it, ignoring case | |
 | `--clear` | delete every recording | |
 | `-i`, `--interval` | (record) time between samples | `5s` |
@@ -50,20 +50,26 @@ starts with `-`, or is the word `record`, goes after `--`: `pw -- -bin`.
 `pw firefo` shows `firefox`, `Firefox-esr`, and anything else whose name
 contains `firefo` in any case.
 
-A threshold compares the peak that `--sort` ranks by:
+`--sort` names a column, and `--threshold` compares that column, in its unit:
 
-| Sort | Threshold | Compares |
+| Sort | Column | Threshold |
 |---|---|---|
-| `ram` | `>1gb`, `<500mb`, `>1.5tb` | PEAK RAM |
-| `cpu` | `>200%`, `<0.5%` | PEAK CPU |
+| `peak-ram`, or `ram` (default) | PEAK RAM | `>1gb`, `<500mb`, `>1.5tb` |
+| `peak-cpu`, or `cpu` | PEAK CPU | `>200%`, `<0.5%` |
+| `avg-ram` | AVG RAM | `>1gb` |
+| `avg-cpu` | AVG CPU | `>50%` |
+| `cpu-time` | CPU TIME | `>10m`, `<1h30m` |
+| `procs` | PROCS | `>20` |
 
 Sizes are binary, as the report shows them: `1gb` is 1024 MiB, the `1.0 GiB`
-of the PEAK RAM column; `mib`, `gib`, and `tib` mean the same. Quote the
-threshold, since a shell takes a bare `>` or `<` as a redirection:
+of the RAM columns; `mib`, `gib`, and `tib` mean the same. A CPU percentage
+is of one core. Quote the threshold, since a shell takes a bare `>` or `<` as
+a redirection:
 
 ```
 pw -t '>1gb'
 pw firefox -s cpu --threshold '>200%'
+pw -s avg-cpu -t '>50%' -p 1d
 ```
 
 Run the recorder as a background service (below). A report covers only time

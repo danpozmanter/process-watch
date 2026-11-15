@@ -30,7 +30,7 @@ pass "help and version"
 status=0
 "$bin" --sort disk -d "$data" 2>"$work/err" || status=$?
 [ "$status" -eq 2 ] || fail "a bad --sort exits 2, got $status"
-grep -q 'takes ram or cpu' "$work/err" || fail "a bad --sort names the choices"
+grep -q 'takes peak-ram, peak-cpu' "$work/err" || fail "a bad --sort names the choices"
 status=0
 "$bin" -d "$data" 2>"$work/err" || status=$?
 [ "$status" -eq 1 ] || fail "a report with nothing recorded exits 1, got $status"
@@ -85,6 +85,7 @@ rows=$("$bin" -d "$data" -s cpu -n 3 | awk 'f { n++ } /^PROGRAM / { f = 1 } END 
 pass "report"
 
 "$bin" -d "$data" -t '<1tb' | grep -q '^PROGRAM ' || fail "every program is below 1 TiB of RAM"
+"$bin" -d "$data" -s procs -t '>0' | grep -q '^PROGRAM ' || fail "every program had a process"
 "$bin" -d "$data" -s cpu -t '>100000%' | grep -q '^PROGRAM ' && fail "no program is above 100000% CPU"
 "$bin" -d "$data" no-such-program-name | grep -q 'matching `no-such-program-name`' ||
     fail "the heading names the pattern"

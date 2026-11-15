@@ -128,7 +128,10 @@ fn a_bad_argument_exits_two_and_names_the_problem() {
     let scratch = Scratch::new("bad-arg");
     let output = run(&scratch.0, &["--sort", "disk"]);
     assert_eq!(output.status.code(), Some(2));
-    assert_eq!(stderr(&output), "pw: --sort takes ram or cpu; got `disk`\n");
+    assert_eq!(
+        stderr(&output),
+        "pw: --sort takes peak-ram, peak-cpu, avg-ram, avg-cpu, cpu-time, procs; got `disk`\n"
+    );
 }
 
 #[test]
@@ -164,9 +167,8 @@ fn a_report_ranks_what_was_recorded() {
     assert!(rows[0].starts_with("small "));
 }
 
-#[test]
-fn a_report_shows_only_programs_matching_its_pattern_and_threshold() {
-    let scratch = Scratch::new("filter");
+/// A data folder holding one minute of three mail and browser programs.
+fn three_programs(scratch: &Scratch) -> PathBuf {
     let data = scratch.path("data");
     fs::create_dir_all(&data).unwrap();
     let gib = 1 << 30;
@@ -176,24 +178,49 @@ fn a_report_shows_only_programs_matching_its_pattern_and_threshold() {
         ("thunderbird", 3 * gib),
     ]);
     fs::write(data.join("current.tsv"), text).unwrap();
+    data
+}
+
+/// The report pw prints for `args`, and the programs in its table, in order.
+fn report_of(scratch: &Scratch, args: &[&str]) -> (String, Vec<String>) {
+    let report = stdout(&run(&scratch.0, args));
+    let names = table_rows(&report)
+        .iter()
+        .filter_map(|row| row.split_whitespace().next())
+        .map(str::to_owned)
+        .collect();
+    (report, names)
+}
+
+#[test]
+fn a_report_shows_only_programs_matching_its_pattern_and_threshold() {
+    let scratch = Scratch::new("filter");
+    let data = three_programs(&scratch);
     let dir = data.to_str().unwrap();
 
-    let matching = stdout(&run(&scratch.0, &["-d", dir, "FIREFO"]));
-    let rows = table_rows(&matching);
-    assert_eq!(rows.len(), 2, "{matching}");
-    assert!(rows[0].starts_with("firefox "), "{matching}");
-    assert!(rows[1].starts_with("Firefox-esr "), "{matching}");
+    let (_, names) = report_of(&scratch, &["-d", dir, "FIREFO"]);
+    assert_eq!(names, ["firefox", "Firefox-esr"]);
 
-    let heavy = stdout(&run(&scratch.0, &["-d", dir, "fire", "-t", ">1gb"]));
+    let (heavy, names) = report_of(&scratch, &["-d", dir, "fire", "-t", ">1gb"]);
     assert!(heavy.contains(", matching `fire`, with peak RAM above 1.0 GiB\n"));
-    let rows = table_rows(&heavy);
-    assert_eq!(rows.len(), 1, "{heavy}");
-    assert!(rows[0].starts_with("firefox "), "{heavy}");
+    assert_eq!(names, ["firefox"]);
 
-    let light = stdout(&run(&scratch.0, &["-d", dir, "--threshold=<1gb"]));
-    let rows = table_rows(&light);
-    assert_eq!(rows.len(), 1, "{light}");
-    assert!(rows[0].starts_with("Firefox-esr "), "{light}");
+    let (_, names) = report_of(&scratch, &["-d", dir, "--threshold=<1gb"]);
+    assert_eq!(names, ["Firefox-esr"]);
+}
+
+#[test]
+fn a_threshold_compares_the_sorted_column_in_its_unit() {
+    let scratch = Scratch::new("sort-column");
+    let data = three_programs(&scratch);
+    let dir = data.to_str().unwrap();
+
+    let (steady, names) = report_of(&scratch, &["-d", dir, "-s", "avg-ram", "-t", ">1gb"]);
+    assert!(steady.contains("by average RAM, highest first, with average RAM above 1.0 GiB\n"));
+    assert_eq!(names, ["thunderbird", "firefox"]);
+
+    let (_, names) = report_of(&scratch, &["-d", dir, "-s", "procs", "-t", ">2"]);
+    assert!(names.is_empty());
 
     let busy = run(&scratch.0, &["-d", dir, "-s", "cpu", "-t", ">1gb"]);
     assert_eq!(busy.status.code(), Some(2));

@@ -3,17 +3,11 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
 
+use crate::sort_key::SortKey;
 use crate::span::{self, NS_PER_MS};
 use crate::store::{self, Bucket, RecorderLock, Usage};
 use crate::threshold::Threshold;
 use crate::{data_dir, size};
-
-/// The measure programs are ranked by.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SortKey {
-    Ram,
-    Cpu,
-}
 
 /// Which end of the ranking comes first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -109,31 +103,31 @@ impl Summary {
     /// The summary keeping only the programs the pattern and threshold admit.
     fn filtered(mut self, opts: &ReportOptions) -> Self {
         let pattern = opts.pattern.as_deref().map(str::to_lowercase);
+        let covered_ms = self.covered_ms.max(1);
         self.rows.retain(|row| {
             pattern
                 .as_deref()
                 .is_none_or(|p| row.name.to_lowercase().contains(p))
-                && opts.threshold.is_none_or(|t| t.admits(&row.usage))
+                && opts
+                    .threshold
+                    .is_none_or(|t| t.admits(&row.usage, covered_ms))
         });
         self
     }
 }
 
-/// The row's ranking peak, then the other peak to break ties.
-fn ranking_key(row: &Row, sort: SortKey) -> (i64, i64) {
-    let Usage {
-        peak_cpu_permille,
-        peak_mem,
-        ..
-    } = row.usage;
-    match sort {
-        SortKey::Ram => (peak_mem, peak_cpu_permille),
-        SortKey::Cpu => (peak_cpu_permille, peak_mem),
-    }
+/// The row's ranking value, then its peak RAM and peak CPU to break ties.
+fn ranking_key(row: &Row, sort: SortKey) -> (i64, i64, i64) {
+    let usage = &row.usage;
+    (
+        sort.rank_value(usage),
+        usage.peak_mem,
+        usage.peak_cpu_permille,
+    )
 }
 
 /// The first `number` rows, ranked by `sort` in `order`; ties fall to the
-/// other peak, then to the name, so the ranking is the same on every run.
+/// peaks, then to the name, so the ranking is the same on every run.
 fn rank(mut rows: Vec<Row>, sort: SortKey, order: Order, number: usize) -> Vec<Row> {
     rows.sort_by(|a, b| {
         let by_usage = ranking_key(a, sort).cmp(&ranking_key(b, sort));
@@ -150,10 +144,7 @@ fn rank(mut rows: Vec<Row>, sort: SortKey, order: Order, number: usize) -> Vec<R
 /// The two header lines naming the period, the coverage, the ranking, and
 /// any pattern and threshold the programs were chosen by.
 fn heading(summary: &Summary, shown: usize, opts: &ReportOptions) -> String {
-    let measure = match opts.sort {
-        SortKey::Ram => "peak RAM",
-        SortKey::Cpu => "peak CPU",
-    };
+    let measure = opts.sort.label();
     let direction = match opts.order {
         Order::Desc => "highest",
         Order::Asc => "lowest",
@@ -259,7 +250,7 @@ mod tests {
         ReportOptions {
             number: 10,
             order: Order::Desc,
-            sort: SortKey::Ram,
+            sort: SortKey::PeakRam,
             period_ms: 3_600_000,
             pattern: None,
             threshold: None,
@@ -268,7 +259,7 @@ mod tests {
     }
 
     #[test]
-    fn ranking_by_ram_descends_by_peak_and_breaks_ties_by_peak_cpu_then_name() {
+    fn ranking_by_peak_ram_descends_and_breaks_ties_by_peak_cpu_then_name() {
         let rows = vec![
             row("a", 5, 100),
             row("b", 9, 100),
@@ -276,7 +267,7 @@ mod tests {
             row("d", 9, 100),
         ];
         assert_eq!(
-            names(&rank(rows, SortKey::Ram, Order::Desc, 3)),
+            names(&rank(rows, SortKey::PeakRam, Order::Desc, 3)),
             ["c", "b", "d"]
         );
     }
@@ -285,7 +276,7 @@ mod tests {
     fn ranking_by_cpu_ascending_puts_the_lowest_peak_first() {
         let rows = vec![row("a", 5, 100), row("b", 9, 100), row("c", 1, 300)];
         assert_eq!(
-            names(&rank(rows, SortKey::Cpu, Order::Asc, 10)),
+            names(&rank(rows, SortKey::PeakCpu, Order::Asc, 10)),
             ["c", "a", "b"]
         );
     }
@@ -297,10 +288,32 @@ mod tests {
         steady.usage.mem_byte_ms = 1_000_000_000_000;
         let rows = vec![steady, row("spiky", 900, 900)];
         assert_eq!(
-            names(&rank(rows.clone(), SortKey::Cpu, Order::Desc, 1)),
+            names(&rank(rows.clone(), SortKey::PeakCpu, Order::Desc, 1)),
             ["spiky"]
         );
-        assert_eq!(names(&rank(rows, SortKey::Ram, Order::Desc, 1)), ["spiky"]);
+        assert_eq!(
+            names(&rank(rows, SortKey::PeakRam, Order::Desc, 1)),
+            ["spiky"]
+        );
+    }
+
+    #[test]
+    fn ranking_by_averages_and_totals_follows_what_was_used_over_the_period() {
+        let mut steady = row("steady", 100, 100);
+        steady.usage.cpu_ns = 50;
+        steady.usage.mem_byte_ms = 50;
+        let mut spiky = row("spiky", 900, 900);
+        spiky.usage.cpu_ns = 10;
+        spiky.usage.mem_byte_ms = 10;
+        spiky.usage.peak_procs = 3;
+        let rows = vec![spiky, steady];
+        for key in [SortKey::AvgRam, SortKey::AvgCpu, SortKey::CpuTime] {
+            assert_eq!(names(&rank(rows.clone(), key, Order::Desc, 1)), ["steady"]);
+        }
+        assert_eq!(
+            names(&rank(rows, SortKey::Procs, Order::Desc, 1)),
+            ["spiky"]
+        );
     }
 
     #[test]
@@ -344,7 +357,7 @@ mod tests {
     fn the_heading_names_cpu_ranking_from_the_lowest() {
         let summary = summarize(&[]);
         let opts = ReportOptions {
-            sort: SortKey::Cpu,
+            sort: SortKey::PeakCpu,
             order: Order::Asc,
             ..options(None)
         };
@@ -379,7 +392,7 @@ mod tests {
              G\t0\t0\t9000000\t1000\t1\tsmall\n",
         ));
         let opts = ReportOptions {
-            threshold: Threshold::parse("<0.001mb", SortKey::Ram),
+            threshold: Threshold::parse("<0.001mb", SortKey::PeakRam),
             ..options(None)
         };
         let kept = summary.filtered(&opts);
@@ -407,8 +420,8 @@ mod tests {
     fn the_heading_names_the_pattern_then_the_threshold() {
         let opts = ReportOptions {
             pattern: Some("fire".to_owned()),
-            threshold: Threshold::parse(">50%", SortKey::Cpu),
-            sort: SortKey::Cpu,
+            threshold: Threshold::parse(">50%", SortKey::PeakCpu),
+            sort: SortKey::PeakCpu,
             ..options(None)
         };
         assert!(heading(&summarize(&[]), 0, &opts).contains(

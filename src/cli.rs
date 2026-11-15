@@ -1,7 +1,8 @@
 use std::path::PathBuf;
 
 use crate::recorder::RecordOptions;
-use crate::report::{Order, ReportOptions, SortKey};
+use crate::report::{Order, ReportOptions};
+use crate::sort_key::{SortKey, Unit};
 use crate::span::{self, DAY_MS, HOUR_MS, SECOND_MS};
 use crate::threshold::Threshold;
 
@@ -20,13 +21,17 @@ Usage:
 Report options:
   PATTERN                show only programs whose name contains it, in any case
   -n, --number N         programs to show (default 10)
-  -s, --sort ram|cpu     rank by peak RAM or peak CPU (default ram)
+  -s, --sort COLUMN      the column to rank by (default peak-ram):
+                           peak-ram, or ram   peak-cpu, or cpu
+                           avg-ram   avg-cpu   cpu-time   procs
   -o, --order desc|asc   highest or lowest first (default desc)
   -p, --period SPAN      how far back to look, e.g. 6h, 2d, up to 30d (default 1h)
-  -t, --threshold LIMIT  show only programs whose peak is above (>) or below
-                         (<) a limit: peak RAM in mb, gb, or tb, e.g. '>1gb',
-                         or with --sort cpu, peak CPU, e.g. '>200%'. Quote
-                         it: a shell takes a bare > or < as a redirection
+  -t, --threshold LIMIT  show only programs above (>) or below (<) a limit on
+                         the --sort column, in its unit: RAM in mb, gb, or
+                         tb ('>1gb'), CPU as a percentage of one core
+                         ('>200%'), cpu-time as a span ('>10m'), procs as a
+                         count ('>20'). Quote it: a shell takes a bare > or
+                         < as a redirection
 
 Record options:
   -i, --interval SPAN    time between samples, e.g. 5s, 30s (default 5s)
@@ -140,7 +145,7 @@ impl Parsed {
             report: ReportOptions {
                 number: 10,
                 order: Order::Desc,
-                sort: SortKey::Ram,
+                sort: SortKey::PeakRam,
                 period_ms: HOUR_MS,
                 pattern: None,
                 threshold: None,
@@ -288,11 +293,10 @@ fn count_arg(flag: &str, value: &str) -> Result<usize, String> {
 }
 
 fn sort_arg(flag: &str, value: &str) -> Result<SortKey, String> {
-    match value.to_ascii_lowercase().as_str() {
-        "ram" | "mem" | "memory" => Ok(SortKey::Ram),
-        "cpu" => Ok(SortKey::Cpu),
-        _ => Err(format!("{flag} takes ram or cpu; got `{value}`")),
-    }
+    SortKey::named(value).ok_or_else(|| {
+        let names: Vec<&str> = SortKey::ALL.iter().map(|key| key.name()).collect();
+        format!("{flag} takes {}; got `{value}`", names.join(", "))
+    })
 }
 
 fn order_arg(flag: &str, value: &str) -> Result<Order, String> {
@@ -304,13 +308,17 @@ fn order_arg(flag: &str, value: &str) -> Result<Order, String> {
 }
 
 fn threshold_arg(flag: &str, value: &str, sort: SortKey) -> Result<Threshold, String> {
-    Threshold::parse(value, sort).ok_or_else(|| match sort {
-        SortKey::Ram => {
-            format!("{flag} takes > or < and a size in mb, gb, or tb, such as >1gb; got `{value}`")
-        }
-        SortKey::Cpu => format!(
-            "{flag} with --sort cpu takes > or < and a percentage, such as >200%; got `{value}`"
-        ),
+    Threshold::parse(value, sort).ok_or_else(|| {
+        let (amount, example) = match sort.unit() {
+            Unit::Size => ("a size in mb, gb, or tb", ">1gb"),
+            Unit::Percent => ("a percentage", ">200%"),
+            Unit::Span => ("a span", ">10m"),
+            Unit::Count => ("a whole number", ">20"),
+        };
+        format!(
+            "{flag} with --sort {} takes > or < and {amount}, such as {example}; got `{value}`",
+            sort.name()
+        )
     })
 }
 
@@ -346,7 +354,7 @@ mod tests {
     fn report_defaults_to_top_ten_by_ram_descending_over_an_hour() {
         let opts = report_of(&[]);
         assert_eq!(opts.number, 10);
-        assert_eq!(opts.sort, SortKey::Ram);
+        assert_eq!(opts.sort, SortKey::PeakRam);
         assert_eq!(opts.order, Order::Desc);
         assert_eq!(opts.period_ms, 3_600_000);
         assert_eq!(opts.pattern, None);
@@ -367,7 +375,7 @@ mod tests {
             "/x",
         ]);
         assert_eq!(opts.number, 5);
-        assert_eq!(opts.sort, SortKey::Cpu);
+        assert_eq!(opts.sort, SortKey::PeakCpu);
         assert_eq!(opts.order, Order::Asc);
         assert_eq!(opts.period_ms, 7_200_000);
         assert_eq!(opts.dir, Some(PathBuf::from("/x")));
@@ -442,7 +450,7 @@ mod tests {
         );
         assert_eq!(
             error_of(&["--sort", "disk"]),
-            "--sort takes ram or cpu; got `disk`"
+            "--sort takes peak-ram, peak-cpu, avg-ram, avg-cpu, cpu-time, procs; got `disk`"
         );
         assert_eq!(error_of(&["-o", "up"]), "-o takes desc or asc; got `up`");
         assert_eq!(
@@ -469,7 +477,7 @@ mod tests {
     #[test]
     fn sort_and_order_values_ignore_case_and_take_memory_as_ram() {
         let opts = report_of(&["--sort", "Memory", "--order", "ASC"]);
-        assert_eq!(opts.sort, SortKey::Ram);
+        assert_eq!(opts.sort, SortKey::PeakRam);
         assert_eq!(opts.order, Order::Asc);
     }
 
@@ -479,7 +487,7 @@ mod tests {
         let opts = report_of(&["-n", "3", "Fire", "-s", "cpu"]);
         assert_eq!(opts.pattern.as_deref(), Some("Fire"));
         assert_eq!(opts.number, 3);
-        assert_eq!(opts.sort, SortKey::Cpu);
+        assert_eq!(opts.sort, SortKey::PeakCpu);
     }
 
     #[test]
@@ -512,7 +520,7 @@ mod tests {
     }
 
     #[test]
-    fn thresholds_measure_the_peak_the_sort_ranks_by_wherever_it_is_given() {
+    fn thresholds_measure_the_sort_column_wherever_it_is_given() {
         let ram = report_of(&["-t", ">1gb"]).threshold.map(|t| t.describe());
         assert_eq!(ram.as_deref(), Some("peak RAM above 1.0 GiB"));
         let cpu = report_of(&["--threshold=<50%", "-s", "cpu"]).threshold;
@@ -520,25 +528,50 @@ mod tests {
             cpu.map(|t| t.describe()).as_deref(),
             Some("peak CPU below 50%")
         );
+        let time = report_of(&["-s", "cpu-time", "-t>10m"]).threshold;
         assert_eq!(
-            error_of(&["-s", "cpu", "-t>10m"]),
-            "-t with --sort cpu takes > or < and a percentage, such as >200%; got `>10m`"
+            time.map(|t| t.describe()).as_deref(),
+            Some("CPU time above 10m")
         );
+        let procs = report_of(&["-t", "<3", "--sort=procs"]).threshold;
+        assert_eq!(
+            procs.map(|t| t.describe()).as_deref(),
+            Some("process count below 3")
+        );
+    }
+
+    #[test]
+    fn every_sort_column_is_taken_with_ram_and_cpu_short_for_the_peaks() {
+        assert_eq!(report_of(&["-s", "ram"]).sort, SortKey::PeakRam);
+        assert_eq!(report_of(&["-s", "CPU"]).sort, SortKey::PeakCpu);
+        for key in SortKey::ALL {
+            assert_eq!(report_of(&["--sort", key.name()]).sort, key);
+        }
     }
 
     #[test]
     fn bad_thresholds_name_what_the_sort_takes() {
         assert_eq!(
             error_of(&["-t", "1gb"]),
-            "-t takes > or < and a size in mb, gb, or tb, such as >1gb; got `1gb`"
+            "-t with --sort peak-ram takes > or < and a size in mb, gb, or tb, such as >1gb; \
+             got `1gb`"
         );
         assert_eq!(
             error_of(&["--threshold", ">50%"]),
-            "--threshold takes > or < and a size in mb, gb, or tb, such as >1gb; got `>50%`"
+            "--threshold with --sort peak-ram takes > or < and a size in mb, gb, or tb, \
+             such as >1gb; got `>50%`"
         );
         assert_eq!(
             error_of(&["-t", ">1gb", "--sort", "cpu"]),
-            "-t with --sort cpu takes > or < and a percentage, such as >200%; got `>1gb`"
+            "-t with --sort peak-cpu takes > or < and a percentage, such as >200%; got `>1gb`"
+        );
+        assert_eq!(
+            error_of(&["-s", "cpu-time", "-t", ">50%"]),
+            "-t with --sort cpu-time takes > or < and a span, such as >10m; got `>50%`"
+        );
+        assert_eq!(
+            error_of(&["-s", "procs", "-t", ">1.5"]),
+            "-t with --sort procs takes > or < and a whole number, such as >20; got `>1.5`"
         );
         assert_eq!(
             error_of(&["--clear", "-t", ">1gb"]),

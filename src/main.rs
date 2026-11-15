@@ -8,6 +8,7 @@ mod report;
 mod rollup;
 mod size;
 mod snapshot;
+mod sort_key;
 mod span;
 mod store;
 mod threshold;

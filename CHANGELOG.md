@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.0
+
+- `--sort` takes any number column: `peak-ram` (`ram`), `peak-cpu` (`cpu`), `avg-ram`, `avg-cpu`, `cpu-time`, or `procs`.
+- `-t`/`--threshold` compares the sorted column in its unit: `'>1gb'`, `'>200%'`, `'>10m'`, or `'>20'`.
+
 ## 0.3.0
 
 - `--sort` ranks by peak RAM or peak CPU, not by average RAM or total CPU time.
