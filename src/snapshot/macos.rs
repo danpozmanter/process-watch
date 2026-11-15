@@ -64,6 +64,7 @@ impl Lister {
             procs,
             now_ns,
             resolution_ns: 1_000,
+            events: None,
         })
     }
 

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.2
+
+- On Linux 6.6+, CPU of orphans too short-lived to sample goes to the program that started them, not to `systemd` or init.
+
 ## 0.1.1
 
 - Programs launched by session wrappers (`dbus-run-session`, `xinit`, `pkexec`, ...) and Wayland compositors count as their own programs, not the wrapper's.

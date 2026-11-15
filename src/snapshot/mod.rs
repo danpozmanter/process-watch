@@ -2,6 +2,8 @@
 mod freebsd;
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(target_os = "linux")]
+mod linux_events;
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(windows)]
@@ -44,6 +46,32 @@ pub struct Proc {
     pub name: String,
 }
 
+/// A process starting or ending, as the OS reported it, with times in
+/// nanoseconds on a clock only events compare against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(
+    not(any(target_os = "linux", test)),
+    expect(
+        dead_code,
+        reason = "only Linux reports forks and exits to an unprivileged process; \
+                  the ledger that follows them is the same on every platform"
+    )
+)]
+pub enum ProcEvent {
+    Fork {
+        parent: i64,
+        child: i64,
+        at_ns: i64,
+    },
+    /// `parent` is the process that reaps it: an ancestor further up when
+    /// the parent that started it exited first.
+    Exit {
+        pid: i64,
+        parent: i64,
+        at_ns: i64,
+    },
+}
+
 /// Every process on the host, with the clock reading its start times compare against.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Snapshot {
@@ -52,6 +80,9 @@ pub struct Snapshot {
     /// Granularity the OS reports start times and CPU counters in, each
     /// rounded down to it: a clock tick on Linux, finer elsewhere.
     pub resolution_ns: i64,
+    /// Every fork and exit since the previous snapshot, in order; `None`
+    /// where the OS reports none to an unprivileged process, or some were lost.
+    pub events: Option<Vec<ProcEvent>>,
 }
 
 #[cfg(test)]

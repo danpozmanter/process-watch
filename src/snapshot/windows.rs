@@ -61,6 +61,7 @@ impl Lister {
             procs: self.records().filter_map(to_proc).collect(),
             now_ns,
             resolution_ns: 100,
+            events: None,
         })
     }
 

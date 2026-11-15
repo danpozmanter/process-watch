@@ -176,6 +176,7 @@ mod tests {
                 procs: vec![proc],
                 now_ns: 2 + elapsed_ms * 1_000_000,
                 resolution_ns: 1,
+                events: None,
             };
             let at = self.start + Duration::from_millis(elapsed_ms.unsigned_abs());
             self.recorder

@@ -2,6 +2,7 @@ mod accounting;
 mod clear;
 mod cli;
 mod data_dir;
+mod lineage;
 mod recorder;
 mod report;
 mod rollup;

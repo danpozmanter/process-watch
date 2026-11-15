@@ -192,7 +192,7 @@ jobs:
           Assert-Version "$portable\pw.exe"
           Assert-Portable $portable
 
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v6
         with:
           name: process-watch-${{ matrix.platform }}-${{ matrix.arch }}
           path: |
@@ -246,7 +246,7 @@ jobs:
             tests/smoke.sh "try/process-watch-$VERSION-freebsd-x86_64/pw"
             try/process-watch-*/install.sh --prefix "$PWD/installed" --no-service
             [ "$(installed/bin/pw --version)" = "pw $VERSION" ]
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v6
         with:
           name: process-watch-freebsd-x86_64
           path: |

@@ -85,11 +85,18 @@ adds the child's CPU to the parent's "children" counter. The recorder credits
 the counter's growth, minus what it already counted while the children were
 alive, to the program those children belonged to. When programs that exited
 together share one reaper (`sudo make`), the growth is split in proportion to
-the CPU each used in its last sampled interval. A process whose parent exited
-first is reaped by an ancestor further up (a subreaper such as
-`systemd --user`, or init), and its CPU is matched to that ancestor. Windows
-keeps no such counter, so there, a child that starts and exits between two
-samples is not seen.
+the CPU each used in its last sampled interval. Windows keeps no such
+counter, so there, a child that starts and exits between two samples is not
+seen.
+
+A process whose parent exited first is reaped by an ancestor further up (a
+subreaper such as `systemd --user`, or init). On Linux 6.6 and later the
+recorder follows fork and exit events, so such an orphan's CPU still goes to
+the program that started it, split by run time when orphans of several
+programs land in one interval. Older kernels, macOS, and FreeBSD report no
+such events to an unprivileged process, so there, an orphan no sample saw
+counts toward its reaper; on macOS that reaper is `launchd`, whose counters
+only root can read, so a non-root recorder misses that CPU entirely.
 
 ## What RAM means
 

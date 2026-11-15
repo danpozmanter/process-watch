@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+use crate::lineage::{Lineage, ShortLived};
 use crate::snapshot::{Proc, Snapshot};
 
 /// What one program used over one sampling interval.
@@ -106,6 +107,7 @@ impl<'a> Census<'a> {
 pub struct Ledger {
     seen: HashMap<ProcKey, Seen>,
     previous_now_ns: i64,
+    lineage: Lineage,
 }
 
 impl Ledger {
@@ -121,11 +123,16 @@ impl Ledger {
     /// to the programs the exited processes ran, split by the CPU each used
     /// over its last sampled interval, the best estimate of the unobserved
     /// stretch; with no exited process, or none that was busy across
-    /// programs, it stays with the ancestor's.
+    /// programs, it stays with the ancestor's. Where the OS reports forks and
+    /// exits, an orphan no snapshot listed joins that split under the program
+    /// that started it, rather than leaving its CPU with the subreaper or init
+    /// that reaped it.
     pub fn tally(&mut self, snap: &Snapshot, roots: &[usize]) -> BTreeMap<String, Tally> {
         let census = Census::new(snap);
         let mut gains = self.gains(snap);
-        let reaped_programs = self.match_exits(&census, &mut gains.reaped);
+        let short_lived = self.follow_events(snap);
+        let mut reaped_programs = self.match_exits(&census, &mut gains.reaped);
+        credit_short_lived(&mut reaped_programs, &short_lived, &census);
         let mut usage: BTreeMap<String, Tally> = BTreeMap::new();
         let mut seen = HashMap::with_capacity(snap.procs.len());
         for (i, proc) in snap.procs.iter().enumerate() {
@@ -143,7 +150,24 @@ impl Ledger {
         }
         self.seen = seen;
         self.previous_now_ns = snap.now_ns;
+        self.lineage
+            .forget_listed(|pid| census.index_of(pid).is_some());
         usage
+    }
+
+    /// The processes the snapshot's events report starting and exiting
+    /// unlisted since the previous snapshot.
+    fn follow_events(&mut self, snap: &Snapshot) -> Vec<ShortLived> {
+        let Some(events) = &snap.events else {
+            self.lineage.reset();
+            return Vec::new();
+        };
+        let listed: HashMap<i64, &str> = self
+            .seen
+            .iter()
+            .map(|(&(pid, _), seen)| (pid, seen.program.as_str()))
+            .collect();
+        self.lineage.follow(events, &listed)
     }
 
     fn gains(&self, snap: &Snapshot) -> Gains {
@@ -260,6 +284,32 @@ impl Ledger {
     }
 }
 
+/// Adds what started and exited unlisted to the programs a reaper's tail is
+/// split among, for each reaper that took in an orphan: an orphan's CPU
+/// reaches a subreaper or init, and only the fork events name the program
+/// that started it. Each one's lifetime stands in for the CPU it used.
+fn credit_short_lived<'a>(
+    programs: &mut ReapedPrograms<'a>,
+    short_lived: &'a [ShortLived],
+    census: &Census,
+) {
+    let adopters: HashSet<i64> = short_lived
+        .iter()
+        .filter(|gone| gone.orphaned)
+        .map(|gone| gone.reaper)
+        .collect();
+    for gone in short_lived.iter().filter(|g| adopters.contains(&g.reaper)) {
+        let Some(reaper) = census.index_of(gone.reaper) else {
+            continue;
+        };
+        *programs
+            .entry(reaper)
+            .or_default()
+            .entry(gone.program.as_str())
+            .or_default() += gone.lifetime_ns.max(0);
+    }
+}
+
 /// A reaper's tail divided among exited programs in proportion to their recent CPU.
 fn split_tail<'a>(
     tail: i64,
@@ -297,7 +347,7 @@ fn split_tail<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::snapshot::Proc;
+    use crate::snapshot::{Proc, ProcEvent};
 
     fn p(pid: i64, ppid: i64, start_ns: i64, cpu_ns: i64, child_cpu_ns: i64) -> Proc {
         Proc {
@@ -326,6 +376,7 @@ mod tests {
         Ledger {
             seen: prev.iter().cloned().collect(),
             previous_now_ns: 1000,
+            lineage: Lineage::default(),
         }
     }
 
@@ -337,7 +388,81 @@ mod tests {
             procs,
             now_ns: 2000,
             resolution_ns: 1,
+            events: None,
         }
+    }
+
+    fn fork(parent: i64, child: i64, at_ns: i64) -> ProcEvent {
+        ProcEvent::Fork {
+            parent,
+            child,
+            at_ns,
+        }
+    }
+
+    fn exit(pid: i64, parent: i64, at_ns: i64) -> ProcEvent {
+        ProcEvent::Exit { pid, parent, at_ns }
+    }
+
+    /// A build under a subreaper, whose short-lived child 50 started 51 and
+    /// exited first, leaving 51 to the subreaper; 51 used 500 ns and 50 7 ns.
+    fn orphaned_by_a_build(events: Option<Vec<ProcEvent>>) -> BTreeMap<String, Tally> {
+        let mut ledger = ledger(&[
+            ((100, 1), seen(0, 50, 0, "systemd", 0)),
+            ((1, 5), seen(100, 100, 0, "build", 0)),
+        ]);
+        let mut snap = named(
+            vec![p(100, 0, 1, 50, 500), p(1, 100, 5, 100, 7)],
+            &["systemd", "build"],
+        );
+        snap.events = events;
+        ledger.tally(&snap, &[0, 1])
+    }
+
+    #[test]
+    fn an_orphan_no_snapshot_listed_counts_toward_the_program_that_started_it() {
+        let usage = orphaned_by_a_build(Some(vec![
+            fork(1, 50, 1100),
+            fork(50, 51, 1200),
+            exit(50, 1, 1300),
+            exit(51, 100, 1500),
+        ]));
+        assert_eq!(usage["build"].cpu_ns, 507);
+        assert_eq!(usage["systemd"].cpu_ns, 0);
+    }
+
+    #[test]
+    fn without_events_an_unlisted_orphan_counts_toward_its_reaper() {
+        let usage = orphaned_by_a_build(None);
+        assert_eq!(usage["build"].cpu_ns, 7);
+        assert_eq!(usage["systemd"].cpu_ns, 500);
+    }
+
+    #[test]
+    fn orphans_of_two_programs_split_the_reapers_tail_by_lifetime() {
+        let mut ledger = ledger(&[
+            ((100, 1), seen(0, 50, 0, "systemd", 0)),
+            ((1, 5), seen(100, 0, 0, "a", 0)),
+            ((2, 6), seen(100, 0, 0, "b", 0)),
+        ]);
+        let mut snap = named(
+            vec![
+                p(100, 0, 1, 50, 400),
+                p(1, 100, 5, 0, 0),
+                p(2, 100, 6, 0, 0),
+            ],
+            &["systemd", "a", "b"],
+        );
+        snap.events = Some(vec![
+            fork(1, 50, 1000),
+            fork(2, 60, 1000),
+            exit(50, 100, 1300),
+            exit(60, 100, 1100),
+        ]);
+        let usage = ledger.tally(&snap, &[0, 1, 2]);
+        assert_eq!(usage["a"].cpu_ns, 300);
+        assert_eq!(usage["b"].cpu_ns, 100);
+        assert_eq!(usage["systemd"].cpu_ns, 0);
     }
 
     #[test]

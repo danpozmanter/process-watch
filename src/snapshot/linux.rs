@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{self, Read};
 
+use super::linux_events::EventFeed;
 use super::{Proc, Snapshot};
 
 /// The kernel keeps at most this many bytes of a process's name in `comm`.
@@ -16,13 +17,15 @@ const PF_KTHREAD: i64 = 0x0020_0000;
 type NameKey = (i64, i64, String);
 
 /// Reads processes from /proc, reusing one read buffer across samples and
-/// resolving each long name once per process rather than once per sample.
+/// resolving each long name once per process rather than once per sample,
+/// with the forks and exits between samples where the kernel reports them.
 pub struct Lister {
     ns_per_tick: i64,
     page_bytes: i64,
     buf: Vec<u8>,
     full_names: HashMap<NameKey, String>,
     next_full_names: HashMap<NameKey, String>,
+    events: Option<EventFeed>,
 }
 
 impl Lister {
@@ -34,11 +37,15 @@ impl Lister {
             buf: Vec::with_capacity(1024),
             full_names: HashMap::new(),
             next_full_names: HashMap::new(),
+            events: EventFeed::subscribe(),
         }
     }
 
     /// Every process on the host right now.
     pub fn take(&mut self) -> io::Result<Snapshot> {
+        // Drained before the walk: a process forked after the drain is listed
+        // or reported in the next drain, never neither.
+        let events = self.events.as_mut().and_then(EventFeed::drain);
         let now_ns = boot_clock_ns();
         let mut procs = Vec::with_capacity(1024);
         for entry in fs::read_dir("/proc")? {
@@ -61,6 +68,7 @@ impl Lister {
             procs,
             now_ns,
             resolution_ns: self.ns_per_tick,
+            events,
         })
     }
 
