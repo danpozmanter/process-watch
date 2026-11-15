@@ -185,7 +185,7 @@ fn a_report_shows_only_programs_matching_its_pattern_and_threshold() {
     assert!(rows[1].starts_with("Firefox-esr "), "{matching}");
 
     let heavy = stdout(&run(&scratch.0, &["-d", dir, "fire", "-t", ">1gb"]));
-    assert!(heavy.contains(", matching `fire`, with average RAM above 1.0 GiB\n"));
+    assert!(heavy.contains(", matching `fire`, with peak RAM above 1.0 GiB\n"));
     let rows = table_rows(&heavy);
     assert_eq!(rows.len(), 1, "{heavy}");
     assert!(rows[0].starts_with("firefox "), "{heavy}");

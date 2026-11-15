@@ -1,7 +1,7 @@
 # process-watch
 
-Top programs by RAM or CPU over the past hours (the last hour by default, up to a month),
-with each program's peak CPU and peak RAM. A program counts all of its
+Top programs by peak RAM or peak CPU over the past hours (the last hour by
+default, up to a month). A program counts all of its
 processes together: Firefox's dozen content processes are one row, and
 `cargo build` includes every `rustc` it ran.
 
@@ -15,7 +15,7 @@ Runs on Linux, macOS, Windows, and FreeBSD. Written in Rust, as one binary:
 ```
 $ pw
 Past 1h: 59m 55s recorded, 24 CPUs (100% CPU = one core)
-Top 10 of 131 programs by RAM, highest first
+Top 10 of 131 programs by peak RAM, highest first
 
 PROGRAM            PROCS  CPU TIME  AVG CPU  PEAK CPU    AVG RAM   PEAK RAM
 firefox-bin           22    6m 41s    11.1%    164.0%    5.8 GiB    6.4 GiB
@@ -34,10 +34,10 @@ pw record [-i SPAN] [-r SPAN] [-d DIR]
 | Flag | Meaning | Default |
 |---|---|---|
 | `-n`, `--number` | programs to show | 10 |
-| `-s`, `--sort` | `ram` ranks by average RAM, `cpu` by CPU time | `ram` |
+| `-s`, `--sort` | `ram` ranks by peak RAM, `cpu` by peak CPU | `ram` |
 | `-o`, `--order` | `desc` shows the heaviest first, `asc` the lightest | `desc` |
 | `-p`, `--period` | how far back to look, from `1h` up to `30d` | `1h` |
-| `-t`, `--threshold` | show only programs above (`>`) or below (`<`) a limit; see below | |
+| `-t`, `--threshold` | show only programs whose peak is above (`>`) or below (`<`) a limit; see below | |
 | `PATTERN` | show only programs whose name contains it, ignoring case | |
 | `--clear` | delete every recording | |
 | `-i`, `--interval` | (record) time between samples | `5s` |
@@ -50,21 +50,20 @@ starts with `-`, or is the word `record`, goes after `--`: `pw -- -bin`.
 `pw firefo` shows `firefox`, `Firefox-esr`, and anything else whose name
 contains `firefo` in any case.
 
-A threshold measures what `--sort` ranks by:
+A threshold compares the peak that `--sort` ranks by:
 
 | Sort | Threshold | Compares |
 |---|---|---|
-| `ram` | `>1gb`, `<500mb`, `>1.5tb` | AVG RAM |
-| `cpu` | `>50%`, `<0.5%` | AVG CPU |
-| `cpu` | `>10m`, `<1h30m` | CPU TIME |
+| `ram` | `>1gb`, `<500mb`, `>1.5tb` | PEAK RAM |
+| `cpu` | `>200%`, `<0.5%` | PEAK CPU |
 
 Sizes are binary, as the report shows them: `1gb` is 1024 MiB, the `1.0 GiB`
-of the AVG RAM column; `mib`, `gib`, and `tib` mean the same. Quote the
+of the PEAK RAM column; `mib`, `gib`, and `tib` mean the same. Quote the
 threshold, since a shell takes a bare `>` or `<` as a redirection:
 
 ```
 pw -t '>1gb'
-pw firefox -s cpu --threshold '>5%'
+pw firefox -s cpu --threshold '>200%'
 ```
 
 Run the recorder as a background service (below). A report covers only time

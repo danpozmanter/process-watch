@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.0
+
+- `--sort` ranks by peak RAM or peak CPU, not by average RAM or total CPU time.
+- `-t`/`--threshold` compares peaks: `'>1gb'` for peak RAM, or `'>200%'` with `--sort cpu`.
+
 ## 0.2.0
 
 - Filter by name: `pw firefo` shows every program whose name contains `firefo`, in any case.

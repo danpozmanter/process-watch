@@ -109,34 +109,31 @@ impl Summary {
     /// The summary keeping only the programs the pattern and threshold admit.
     fn filtered(mut self, opts: &ReportOptions) -> Self {
         let pattern = opts.pattern.as_deref().map(str::to_lowercase);
-        let covered_ms = self.covered_ms.max(1);
         self.rows.retain(|row| {
             pattern
                 .as_deref()
                 .is_none_or(|p| row.name.to_lowercase().contains(p))
-                && opts
-                    .threshold
-                    .is_none_or(|t| t.admits(&row.usage, covered_ms))
+                && opts.threshold.is_none_or(|t| t.admits(&row.usage))
         });
         self
     }
 }
 
-/// The row's ranking measure, then the other measure to break ties.
+/// The row's ranking peak, then the other peak to break ties.
 fn ranking_key(row: &Row, sort: SortKey) -> (i64, i64) {
     let Usage {
-        cpu_ns,
-        mem_byte_ms,
+        peak_cpu_permille,
+        peak_mem,
         ..
     } = row.usage;
     match sort {
-        SortKey::Ram => (mem_byte_ms, cpu_ns),
-        SortKey::Cpu => (cpu_ns, mem_byte_ms),
+        SortKey::Ram => (peak_mem, peak_cpu_permille),
+        SortKey::Cpu => (peak_cpu_permille, peak_mem),
     }
 }
 
 /// The first `number` rows, ranked by `sort` in `order`; ties fall to the
-/// other measure, then to the name, so the ranking is the same on every run.
+/// other peak, then to the name, so the ranking is the same on every run.
 fn rank(mut rows: Vec<Row>, sort: SortKey, order: Order, number: usize) -> Vec<Row> {
     rows.sort_by(|a, b| {
         let by_usage = ranking_key(a, sort).cmp(&ranking_key(b, sort));
@@ -154,8 +151,8 @@ fn rank(mut rows: Vec<Row>, sort: SortKey, order: Order, number: usize) -> Vec<R
 /// any pattern and threshold the programs were chosen by.
 fn heading(summary: &Summary, shown: usize, opts: &ReportOptions) -> String {
     let measure = match opts.sort {
-        SortKey::Ram => "RAM",
-        SortKey::Cpu => "CPU",
+        SortKey::Ram => "peak RAM",
+        SortKey::Cpu => "peak CPU",
     };
     let direction = match opts.order {
         Order::Desc => "highest",
@@ -242,12 +239,12 @@ mod tests {
     use super::*;
     use crate::store::decode;
 
-    fn row(name: &str, cpu_ns: i64, mem_byte_ms: i64) -> Row {
+    fn row(name: &str, peak_cpu_permille: i64, peak_mem: i64) -> Row {
         Row {
             name: name.to_owned(),
             usage: Usage {
-                cpu_ns,
-                mem_byte_ms,
+                peak_cpu_permille,
+                peak_mem,
                 peak_procs: 1,
                 ..Usage::default()
             },
@@ -271,7 +268,7 @@ mod tests {
     }
 
     #[test]
-    fn ranking_by_ram_descends_and_breaks_ties_by_cpu_then_name() {
+    fn ranking_by_ram_descends_by_peak_and_breaks_ties_by_peak_cpu_then_name() {
         let rows = vec![
             row("a", 5, 100),
             row("b", 9, 100),
@@ -285,12 +282,25 @@ mod tests {
     }
 
     #[test]
-    fn ranking_by_cpu_ascending_puts_the_lightest_first() {
+    fn ranking_by_cpu_ascending_puts_the_lowest_peak_first() {
         let rows = vec![row("a", 5, 100), row("b", 9, 100), row("c", 1, 300)];
         assert_eq!(
             names(&rank(rows, SortKey::Cpu, Order::Asc, 10)),
             ["c", "a", "b"]
         );
+    }
+
+    #[test]
+    fn ranking_follows_peaks_not_totals_or_averages() {
+        let mut steady = row("steady", 100, 100);
+        steady.usage.cpu_ns = 1_000_000_000_000;
+        steady.usage.mem_byte_ms = 1_000_000_000_000;
+        let rows = vec![steady, row("spiky", 900, 900)];
+        assert_eq!(
+            names(&rank(rows.clone(), SortKey::Cpu, Order::Desc, 1)),
+            ["spiky"]
+        );
+        assert_eq!(names(&rank(rows, SortKey::Ram, Order::Desc, 1)), ["spiky"]);
     }
 
     #[test]
@@ -322,7 +332,7 @@ mod tests {
         assert_eq!(
             render(&summary, &ranked, &opts),
             "Past 1h: 1m recorded, 4 CPUs (100% CPU = one core)\n\
-             Top 2 of 2 programs by RAM, highest first\n\
+             Top 2 of 2 programs by peak RAM, highest first\n\
              \n\
              PROGRAM  PROCS  CPU TIME  AVG CPU  PEAK CPU    AVG RAM  PEAK RAM\n\
              firefox      2       30s    50.0%     90.0%  976.6 KiB   1.9 MiB\n\
@@ -338,7 +348,9 @@ mod tests {
             order: Order::Asc,
             ..options(None)
         };
-        assert!(heading(&summary, 0, &opts).contains("Top 0 of 0 programs by CPU, lowest first"));
+        assert!(
+            heading(&summary, 0, &opts).contains("Top 0 of 0 programs by peak CPU, lowest first")
+        );
     }
 
     #[test]
@@ -363,8 +375,8 @@ mod tests {
     fn thresholds_keep_programs_on_their_side_of_the_limit() {
         let summary = summarize(&decode(
             "B\t1\t60000\t60000\t4\n\
-             G\t0\t0\t120000000\t2000\t1\tbig\n\
-             G\t0\t0\t60000000\t1000\t1\tsmall\n",
+             G\t0\t0\t1000\t2000\t1\tbig\n\
+             G\t0\t0\t9000000\t1000\t1\tsmall\n",
         ));
         let opts = ReportOptions {
             threshold: Threshold::parse("<0.001mb", SortKey::Ram),
@@ -373,7 +385,7 @@ mod tests {
         let kept = summary.filtered(&opts);
         assert_eq!(names(&kept.rows), ["small"]);
         assert!(heading(&kept, 1, &opts).contains(
-            "Top 1 of 1 programs by RAM, highest first, with average RAM below 1.0 KiB\n"
+            "Top 1 of 1 programs by peak RAM, highest first, with peak RAM below 1.0 KiB\n"
         ));
     }
 
@@ -387,7 +399,7 @@ mod tests {
         assert_eq!(
             render(&summary, &[], &opts),
             "Past 1h: 0ms recorded, 1 CPUs (100% CPU = one core)\n\
-             Top 0 of 0 programs by RAM, highest first, matching `zzz`\n"
+             Top 0 of 0 programs by peak RAM, highest first, matching `zzz`\n"
         );
     }
 
@@ -400,7 +412,7 @@ mod tests {
             ..options(None)
         };
         assert!(heading(&summarize(&[]), 0, &opts).contains(
-            "programs by CPU, highest first, matching `fire`, with average CPU above 50%\n"
+            "programs by peak CPU, highest first, matching `fire`, with peak CPU above 50%\n"
         ));
     }
 

@@ -10,7 +10,7 @@ const MAX_RETAIN_MS: i64 = 30 * DAY_MS;
 
 /// The text `--help` prints.
 pub const USAGE: &str = "\
-pw - top programs by RAM or CPU over the past hours
+pw - top programs by peak RAM or peak CPU over the past hours
 
 Usage:
   pw [OPTIONS] [PATTERN]  report on what the recorder saw
@@ -20,14 +20,13 @@ Usage:
 Report options:
   PATTERN                show only programs whose name contains it, in any case
   -n, --number N         programs to show (default 10)
-  -s, --sort ram|cpu     rank by average RAM or by CPU time (default ram)
+  -s, --sort ram|cpu     rank by peak RAM or peak CPU (default ram)
   -o, --order desc|asc   highest or lowest first (default desc)
   -p, --period SPAN      how far back to look, e.g. 6h, 2d, up to 30d (default 1h)
-  -t, --threshold LIMIT  show only programs above (>) or below (<) a limit on
-                         what --sort ranks by: average RAM in mb, gb, or tb,
-                         e.g. '>1gb'; with --sort cpu, average CPU or CPU
-                         time, e.g. '>50%' or '>10m'. Quote it: a shell takes
-                         a bare > or < as a redirection
+  -t, --threshold LIMIT  show only programs whose peak is above (>) or below
+                         (<) a limit: peak RAM in mb, gb, or tb, e.g. '>1gb',
+                         or with --sort cpu, peak CPU, e.g. '>200%'. Quote
+                         it: a shell takes a bare > or < as a redirection
 
 Record options:
   -i, --interval SPAN    time between samples, e.g. 5s, 30s (default 5s)
@@ -310,8 +309,7 @@ fn threshold_arg(flag: &str, value: &str, sort: SortKey) -> Result<Threshold, St
             format!("{flag} takes > or < and a size in mb, gb, or tb, such as >1gb; got `{value}`")
         }
         SortKey::Cpu => format!(
-            "{flag} with --sort cpu takes > or < and a percentage or a CPU time, \
-             such as >50% or >10m; got `{value}`"
+            "{flag} with --sort cpu takes > or < and a percentage, such as >200%; got `{value}`"
         ),
     })
 }
@@ -514,18 +512,17 @@ mod tests {
     }
 
     #[test]
-    fn thresholds_measure_what_the_sort_ranks_by_wherever_it_is_given() {
+    fn thresholds_measure_the_peak_the_sort_ranks_by_wherever_it_is_given() {
         let ram = report_of(&["-t", ">1gb"]).threshold.map(|t| t.describe());
-        assert_eq!(ram.as_deref(), Some("average RAM above 1.0 GiB"));
+        assert_eq!(ram.as_deref(), Some("peak RAM above 1.0 GiB"));
         let cpu = report_of(&["--threshold=<50%", "-s", "cpu"]).threshold;
         assert_eq!(
             cpu.map(|t| t.describe()).as_deref(),
-            Some("average CPU below 50%")
+            Some("peak CPU below 50%")
         );
-        let time = report_of(&["-s", "cpu", "-t>10m"]).threshold;
         assert_eq!(
-            time.map(|t| t.describe()).as_deref(),
-            Some("CPU time above 10m")
+            error_of(&["-s", "cpu", "-t>10m"]),
+            "-t with --sort cpu takes > or < and a percentage, such as >200%; got `>10m`"
         );
     }
 
@@ -541,8 +538,7 @@ mod tests {
         );
         assert_eq!(
             error_of(&["-t", ">1gb", "--sort", "cpu"]),
-            "-t with --sort cpu takes > or < and a percentage or a CPU time, \
-             such as >50% or >10m; got `>1gb`"
+            "-t with --sort cpu takes > or < and a percentage, such as >200%; got `>1gb`"
         );
         assert_eq!(
             error_of(&["--clear", "-t", ">1gb"]),

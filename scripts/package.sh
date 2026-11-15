@@ -34,7 +34,7 @@ need() {
 }
 
 name=process-watch
-summary="Top programs by RAM or CPU over the past hours"
+summary="Top programs by peak RAM or peak CPU over the past hours"
 description="pw records every process's CPU and memory and reports the programs that used the most, with subprocesses rolled into the program that ran them."
 maintainer="process-watch contributors"
 homepage="https://github.com/danpozmanter/process-watch"
