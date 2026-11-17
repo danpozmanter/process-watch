@@ -81,6 +81,8 @@ impl Drop for Recorder {
 
 /// One minute of recording, opened now, in which each program used a
 /// second of CPU and held its bytes of memory throughout.
+/// The minute in progress, as the recorder writes it: CPU in ms, memory in
+/// KiB, the average first, then the peak.
 fn minute_of(programs: &[(&str, i64)]) -> String {
     let now_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -88,10 +90,8 @@ fn minute_of(programs: &[(&str, i64)]) -> String {
         .unwrap();
     let mut text = format!("B\t{}\t{now_ms}\t60000\t4\n", now_ms / 60_000);
     for (name, mem_bytes) in programs {
-        let mem_byte_ms = mem_bytes * 60_000;
-        text.push_str(&format!(
-            "G\t1000000000\t100\t{mem_byte_ms}\t{mem_bytes}\t2\t{name}\n"
-        ));
+        let kib = mem_bytes / 1024;
+        text.push_str(&format!("G\t1000\t100\t{kib}\t{kib}\t2\t{name}\n"));
     }
     text
 }
@@ -149,8 +149,8 @@ fn a_report_ranks_what_was_recorded() {
     let scratch = Scratch::new("report");
     let data = scratch.path("data");
     fs::create_dir_all(&data).unwrap();
-    let text = minute_of(&[("small", 1000), ("large", 9000)]);
-    fs::write(data.join("current.tsv"), text).unwrap();
+    let text = minute_of(&[("small", 1000 << 10), ("large", 9000 << 10)]);
+    fs::write(data.join("minute.tsv"), text).unwrap();
     let dir = data.to_str().unwrap();
 
     let by_ram = run(&scratch.0, &["-d", dir]);
@@ -177,7 +177,7 @@ fn three_programs(scratch: &Scratch) -> PathBuf {
         ("Firefox-esr", gib / 2),
         ("thunderbird", 3 * gib),
     ]);
-    fs::write(data.join("current.tsv"), text).unwrap();
+    fs::write(data.join("minute.tsv"), text).unwrap();
     data
 }
 
@@ -227,11 +227,70 @@ fn a_threshold_compares_the_sorted_column_in_its_unit() {
 }
 
 #[test]
+fn a_breakdown_shows_how_many_builds_ran_and_what_they_ran() {
+    let scratch = Scratch::new("breakdown");
+    let data = scratch.path("data");
+    fs::create_dir_all(&data).unwrap();
+    let gib: i64 = 1 << 30;
+    let gib_in_kib = gib >> 10;
+    let mut text = minute_of(&[("editor", gib)]);
+    // Three builds at once: 3 cargo processes and the 12 rustc they ran.
+    text.push_str(&format!(
+        "G\t1000\t100\t{0}\t{0}\t15\tcargo\n\
+         R\t3\n\
+         P\t100\t10\t{1}\t{1}\t3\tcargo\n\
+         P\t900\t90\t{2}\t{2}\t12\trustc\n",
+        33 * gib_in_kib,
+        gib_in_kib,
+        32 * gib_in_kib,
+    ));
+    fs::write(data.join("minute.tsv"), text).unwrap();
+    let dir = data.to_str().unwrap();
+
+    let (report, names) = report_of(&scratch, &["-d", dir, "-b", "cargo"]);
+    assert_eq!(names, ["cargo", "rustc", "cargo"], "{report}");
+    let rows = table_rows(&report);
+    let first: Vec<&str> = rows[0].split_whitespace().collect();
+    assert_eq!(first[..3], ["cargo", "3", "15"], "{report}");
+    assert!(rows[1].ends_with("32.0 GiB"), "{report}");
+
+    let (plain, names) = report_of(&scratch, &["-d", dir, "cargo"]);
+    assert_eq!(names, ["cargo"]);
+    assert!(!plain.contains("RUNS"));
+}
+
+#[test]
+fn a_report_reads_what_an_older_recorder_kept() {
+    let scratch = Scratch::new("legacy");
+    let data = scratch.path("data");
+    fs::create_dir_all(&data).unwrap();
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| i64::try_from(d.as_millis()).unwrap())
+        .unwrap();
+    // CPU in ns, memory-time in byte-ms, peak memory in bytes.
+    let text = format!(
+        "B\t{}\t{now_ms}\t60000\t4\nG\t30000000000\t900\t{}\t{}\t2\told\n",
+        now_ms / 60_000,
+        (2i64 << 30) * 60_000,
+        3i64 << 30
+    );
+    fs::write(data.join("current.tsv"), text).unwrap();
+    let (report, names) = report_of(&scratch, &["-d", data.to_str().unwrap()]);
+    assert_eq!(names, ["old"]);
+    let row: Vec<&str> = table_rows(&report)[0].split_whitespace().collect();
+    assert_eq!(
+        row[2..],
+        ["30s", "50.0%", "90.0%", "2.0", "GiB", "3.0", "GiB"]
+    );
+}
+
+#[test]
 fn clearing_removes_what_a_report_would_show() {
     let scratch = Scratch::new("clear");
     let data = scratch.path("data");
     fs::create_dir_all(&data).unwrap();
-    fs::write(data.join("current.tsv"), minute_of(&[("editor", 100)])).unwrap();
+    fs::write(data.join("minute.tsv"), minute_of(&[("editor", 100 << 10)])).unwrap();
     let dir = data.to_str().unwrap();
 
     let cleared = run(&scratch.0, &["--clear", "-d", dir]);

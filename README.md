@@ -26,7 +26,7 @@ cargo                 14   23m 10s    38.6%   2280.5%    1.2 GiB    3.9 GiB
 ## Usage
 
 ```
-pw [-n N] [-s COLUMN] [-o desc|asc] [-p SPAN] [-t LIMIT] [-d DIR] [PATTERN]
+pw [-n N] [-s COLUMN] [-o desc|asc] [-p SPAN] [-t LIMIT] [-b] [-d DIR] [PATTERN]
 pw --clear [-d DIR]
 pw record [-i SPAN] [-r SPAN] [-d DIR]
 ```
@@ -38,6 +38,7 @@ pw record [-i SPAN] [-r SPAN] [-d DIR]
 | `-o`, `--order` | `desc` shows the heaviest first, `asc` the lightest | `desc` |
 | `-p`, `--period` | how far back to look, from `1h` up to `30d` | `1h` |
 | `-t`, `--threshold` | show only programs above (`>`) or below (`<`) a limit on the `--sort` column; see below | |
+| `-b`, `--breakdown` | under each program, its processes by name; see below | |
 | `PATTERN` | show only programs whose name contains it, ignoring case | |
 | `--clear` | delete every recording | |
 | `-i`, `--interval` | (record) time between samples | `5s` |
@@ -71,6 +72,27 @@ pw -t '>1gb'
 pw firefox -s cpu --threshold '>200%'
 pw -s avg-cpu -t '>50%' -p 1d
 ```
+
+`-b` answers what a program's numbers are made of: whether 33 GiB of `cargo`
+was one build or three at once, and how much of it was `rustc`. It adds a
+RUNS column, the most copies of the program started apart (as from different
+terminals) that ran at once, and lists the program's processes under it by
+name, ranked by the `--sort` column:
+
+```
+$ pw -b cargo
+Past 1h: 30m recorded, 24 CPUs (100% CPU = one core)
+Top 1 of 1 programs by peak RAM, highest first, matching `cargo`
+
+PROGRAM  RUNS  PROCS  CPU TIME  AVG CPU  PEAK CPU    AVG RAM   PEAK RAM
+cargo       3     15    3h 20m   666.7%   2200.0%   20.0 GiB   33.0 GiB
+  rustc           12    3h 16m   655.6%   2180.0%   19.5 GiB   32.2 GiB
+  cargo            3    3m 20s    11.1%     30.0%  512.0 MiB  819.2 MiB
+```
+
+CPU time and averages of the processes add up to the program's. Each keeps
+its own peaks, which may come at different moments. Time recorded by a `pw`
+older than 0.5.0 has no breakdown, and shows as `(no breakdown)`.
 
 Run the recorder as a background service (below). A report covers only time
 the recorder was running, and its header says how much of the period that was.
@@ -244,16 +266,21 @@ otherwise in:
 | macOS | `~/Library/Application Support/process-watch` |
 | Windows | `%LOCALAPPDATA%\process-watch` |
 
-The recorder keeps one line per program per minute, in one text file per hour
-(`h<unix hour>.tsv`), and keeps the minute in progress in `current.tsv`, so a
-report includes it. It deletes hours older than its retention (`-r`, 12 hours
-by default, up to 30 days) and folds each hour older than a day into a single
-bucket: totals and peaks stay exact, and a report reaching further back than
-a day starts at an hour boundary.
+The recorder keeps one line per program per minute, plus one per process name
+for a program that runs more than one, in one text file per hour
+(`hour-<unix hour>.tsv`), and keeps the minute in progress in `minute.tsv`,
+so a report includes it. CPU is kept to the millisecond and memory to the KiB,
+the precision a report shows. Once an hour ends, its file is gzip-compressed
+(`hour-<unix hour>.tsv.gz`). The recorder deletes hours older than its
+retention (`-r`, 12 hours by default, up to 30 days) and folds each hour older
+than a day into a single bucket: totals and peaks stay exact, and a report
+reaching further back than a day starts at an hour boundary.
 
-A desktop with about 140 programs writes about 340 KB per recorded hour of
-minute detail and about 6 KB per folded hour: about 4 MB at the default 12
-hours, and about 12 MB for a full 30 days.
+A desktop with about 140 programs keeps about 85 KB per finished hour of
+minute detail, 5 KB per folded hour, and up to 1.3 MB for the hour in
+progress: about 2 MB at the default 12 hours, and about 7 MB for a full 30
+days. A recorder from pw 0.4 or earlier wrote `h<unix hour>.tsv` and
+`current.tsv`; the first recorder of a newer pw converts them.
 
 `pw --clear` deletes every recording. A running recorder keeps going and
 records from that moment on.

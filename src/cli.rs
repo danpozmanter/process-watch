@@ -32,6 +32,10 @@ Report options:
                          ('>200%'), cpu-time as a span ('>10m'), procs as a
                          count ('>20'). Quote it: a shell takes a bare > or
                          < as a redirection
+  -b, --breakdown        under each program, its processes by name, ranked by
+                         the --sort column; RUNS counts the copies of the
+                         program started apart (such as builds in different
+                         terminals) running at once, at most
 
 Record options:
   -i, --interval SPAN    time between samples, e.g. 5s, 30s (default 5s)
@@ -149,6 +153,7 @@ impl Parsed {
                 period_ms: HOUR_MS,
                 pattern: None,
                 threshold: None,
+                breakdown: false,
                 dir: None,
             },
             record: RecordOptions {
@@ -258,6 +263,10 @@ pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command, Str
             "-h" | "--help" => return Ok(Command::Help),
             "-V" | "--version" => return Ok(Command::Version),
             "--clear" if mode == Mode::Report => parsed.clear = true,
+            "-b" | "--breakdown" if mode == Mode::Report => {
+                parsed.report.breakdown = true;
+                parsed.report_flag = Some(arg);
+            }
             "--" if mode == Mode::Report => {
                 for pattern in args.by_ref() {
                     parsed.take_pattern(pattern)?;
@@ -359,7 +368,24 @@ mod tests {
         assert_eq!(opts.period_ms, 3_600_000);
         assert_eq!(opts.pattern, None);
         assert_eq!(opts.threshold, None);
+        assert!(!opts.breakdown);
         assert_eq!(opts.dir, None);
+    }
+
+    #[test]
+    fn only_a_report_takes_a_breakdown() {
+        assert!(report_of(&["-b"]).breakdown);
+        let opts = report_of(&["cargo", "--breakdown", "-n", "3"]);
+        assert!(opts.breakdown);
+        assert_eq!(opts.pattern.as_deref(), Some("cargo"));
+        assert_eq!(
+            error_of(&["record", "-b"]),
+            "pw record does not take `-b`; see --help"
+        );
+        assert_eq!(
+            error_of(&["--clear", "--breakdown"]),
+            "--clear takes no report options; got `--breakdown`"
+        );
     }
 
     #[test]

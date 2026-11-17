@@ -82,6 +82,8 @@ pass "recording"
 grep -q '^PROGRAM ' "$work/native.out" || fail "the report has a table header"
 rows=$("$bin" -d "$data" -s cpu -n 3 | awk 'f { n++ } /^PROGRAM / { f = 1 } END { print n + 0 }')
 [ "$rows" -ge 1 ] && [ "$rows" -le 3 ] || fail "-n 3 shows 1 to 3 programs, got $rows"
+"$bin" -d "$data" -b | grep -q '^PROGRAM  *RUNS ' || fail "-b adds a RUNS column"
+"$bin" -d "$data" -b | grep -q '^[^ ].*  [1-9][0-9]*  *[1-9]' || fail "-b counts each program's runs"
 pass "report"
 
 "$bin" -d "$data" -t '<1tb' | grep -q '^PROGRAM ' || fail "every program is below 1 TiB of RAM"
@@ -107,15 +109,23 @@ status=0
 [ "$status" -eq 1 ] || fail "a report after --clear finds nothing, exit 1; got $status"
 pass "clear"
 
+read_store() {
+    case "$1" in
+        *.gz) gzip -dc "$1" ;;
+        *) cat "$1" ;;
+    esac
+}
+
 if [ -n "$expected_ns" ]; then
-    # A bucket can sit in both an hour file and current.tsv; count each once.
+    # Recordings keep CPU in ms, and an hour that has ended is gzip-compressed.
+    # A bucket can sit in both an hour file and minute.tsv; count each once.
     shopt -s nullglob
-    stores=("$data"/*.tsv)
+    stores=("$data"/*.tsv "$data"/*.tsv.gz)
     shopt -u nullglob
-    recorded_ns=$(awk -F'\t' '
+    recorded_ns=$(for store in "${stores[@]}"; do read_store "$store"; done | awk -F'\t' '
         $1 == "B" { key = $2 "/" $3; skip = (key in seen); seen[key] = 1 }
         $1 == "G" && $7 == "pi-burner" && !skip { total += $2 }
-        END { printf "%d", total }' "${stores[@]}")
+        END { printf "%d", total * 1000000 }')
     # Clock ticks round each process's times; allow 5% and 50 ms.
     awk -v got="$recorded_ns" -v want="$expected_ns" 'BEGIN {
         diff = got - want; if (diff < 0) diff = -diff
@@ -123,7 +133,7 @@ if [ -n "$expected_ns" ]; then
     }' || {
         for store in "${stores[@]}"; do
             echo "${store##*/}:" >&2
-            awk -F'\t' '$1 == "B" { b = $0 } $1 == "G" && $7 == "pi-burner" { print "  " b; print "  " $0 }' "$store" >&2
+            read_store "$store" | awk -F'\t' '$1 == "B" { b = $0 } $1 == "G" && $7 == "pi-burner" { print "  " b; print "  " $0 }' >&2
         done
         fail "pi-burner recorded $recorded_ns ns of CPU, measured $expected_ns ns"
     }

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.0
+
+- `-b`/`--breakdown` lists each program's processes by name under it, and adds RUNS, the most copies of the program started apart running at once.
+- Recordings take about a tenth of the space: CPU is kept to the millisecond and memory to the KiB, and each finished hour is compressed. The recorder converts existing recordings when it starts.
+
 ## 0.4.0
 
 - `--sort` takes any number column: `peak-ram` (`ram`), `peak-cpu` (`cpu`), `avg-ram`, `avg-cpu`, `cpu-time`, or `procs`.

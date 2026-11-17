@@ -2,13 +2,20 @@ use std::collections::HashMap;
 
 use crate::snapshot::ProcEvent;
 
+/// Where a process's CPU is credited: its program, and within it, a process name.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct Credit {
+    pub program: String,
+    pub process: String,
+}
+
 /// A process that started and exited between two snapshots, listed by neither.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShortLived {
     /// The process that reaped it.
     pub reaper: i64,
-    /// The program of its nearest ancestor a snapshot listed.
-    pub program: String,
+    /// The credit of its nearest ancestor a snapshot listed.
+    pub credit: Credit,
     pub lifetime_ns: i64,
     /// Whether an ancestor further up reaped it, the parent that started it
     /// having exited first.
@@ -19,12 +26,12 @@ pub struct ShortLived {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Newcomer {
     parent: i64,
-    program: Option<String>,
+    credit: Option<Credit>,
     started_ns: i64,
 }
 
 /// Follows forks and exits between snapshots, so a process no snapshot
-/// listed is still known by the program that started it, even once an
+/// listed is still known by the program and process that started it, even once an
 /// orphan has been handed to a subreaper or init.
 #[derive(Debug, Default)]
 pub struct Lineage {
@@ -33,8 +40,12 @@ pub struct Lineage {
 
 impl Lineage {
     /// The processes among `events` that started and exited unlisted, given
-    /// the program of each process the previous snapshot listed, by pid.
-    pub fn follow(&mut self, events: &[ProcEvent], listed: &HashMap<i64, &str>) -> Vec<ShortLived> {
+    /// the credit of each process the previous snapshot listed, by pid.
+    pub fn follow(
+        &mut self,
+        events: &[ProcEvent],
+        listed: &HashMap<i64, &Credit>,
+    ) -> Vec<ShortLived> {
         let mut gone = Vec::new();
         for event in events {
             match *event {
@@ -51,18 +62,18 @@ impl Lineage {
         gone
     }
 
-    fn started(&mut self, parent: i64, child: i64, at_ns: i64, listed: &HashMap<i64, &str>) {
+    fn started(&mut self, parent: i64, child: i64, at_ns: i64, listed: &HashMap<i64, &Credit>) {
         // A child forked while the previous snapshot was being taken may be in it.
         if listed.contains_key(&child) {
             return;
         }
-        let program = match self.newcomers.get(&parent) {
-            Some(newcomer) => newcomer.program.clone(),
-            None => listed.get(&parent).map(|&program| program.to_owned()),
+        let credit = match self.newcomers.get(&parent) {
+            Some(newcomer) => newcomer.credit.clone(),
+            None => listed.get(&parent).map(|&credit| credit.clone()),
         };
         let newcomer = Newcomer {
             parent,
-            program,
+            credit,
             started_ns: at_ns,
         };
         self.newcomers.insert(child, newcomer);
@@ -72,7 +83,7 @@ impl Lineage {
         let newcomer = self.newcomers.remove(&pid)?;
         Some(ShortLived {
             reaper,
-            program: newcomer.program?,
+            credit: newcomer.credit?,
             lifetime_ns: at_ns - newcomer.started_ns,
             orphaned: reaper != newcomer.parent,
         })
@@ -105,9 +116,27 @@ mod tests {
         ProcEvent::Exit { pid, parent, at_ns }
     }
 
-    fn listed() -> HashMap<i64, &'static str> {
-        HashMap::from([(1, "init"), (10, "build")])
+    fn credit(program: &str) -> Credit {
+        Credit {
+            program: program.to_owned(),
+            process: format!("{program}-proc"),
+        }
     }
+
+    fn follow(
+        lineage: &mut Lineage,
+        events: &[ProcEvent],
+        names: &[(i64, &str)],
+    ) -> Vec<ShortLived> {
+        let credits: Vec<(i64, Credit)> = names
+            .iter()
+            .map(|&(pid, name)| (pid, credit(name)))
+            .collect();
+        let listed = credits.iter().map(|(pid, credit)| (*pid, credit)).collect();
+        lineage.follow(events, &listed)
+    }
+
+    const LISTED: &[(i64, &str)] = &[(1, "init"), (10, "build")];
 
     #[test]
     fn an_orphan_keeps_the_program_of_its_listed_ancestor() {
@@ -119,17 +148,17 @@ mod tests {
             exit(21, 1, 450),
         ];
         assert_eq!(
-            lineage.follow(&events, &listed()),
+            follow(&mut lineage, &events, LISTED),
             [
                 ShortLived {
                     reaper: 10,
-                    program: "build".to_owned(),
+                    credit: credit("build"),
                     lifetime_ns: 100,
                     orphaned: false,
                 },
                 ShortLived {
                     reaper: 1,
-                    program: "build".to_owned(),
+                    credit: credit("build"),
                     lifetime_ns: 300,
                     orphaned: true,
                 },
@@ -140,40 +169,39 @@ mod tests {
     #[test]
     fn a_newcomer_still_running_is_followed_into_the_next_interval() {
         let mut lineage = Lineage::default();
-        assert!(lineage.follow(&[fork(10, 20, 100)], &listed()).is_empty());
-        let later = HashMap::from([(1, "init")]);
-        let gone = lineage.follow(&[exit(20, 1, 900)], &later);
-        assert_eq!(gone[0].program, "build");
+        assert!(follow(&mut lineage, &[fork(10, 20, 100)], LISTED).is_empty());
+        let gone = follow(&mut lineage, &[exit(20, 1, 900)], &[(1, "init")]);
+        assert_eq!(gone[0].credit, credit("build"));
         assert!(gone[0].orphaned);
     }
 
     #[test]
     fn a_newcomer_a_snapshot_lists_is_left_to_the_ledger() {
         let mut lineage = Lineage::default();
-        lineage.follow(&[fork(10, 20, 100)], &listed());
+        follow(&mut lineage, &[fork(10, 20, 100)], LISTED);
         lineage.forget_listed(|pid| pid == 20);
-        assert!(lineage.follow(&[exit(20, 10, 900)], &listed()).is_empty());
+        assert!(follow(&mut lineage, &[exit(20, 10, 900)], LISTED).is_empty());
     }
 
     #[test]
     fn a_child_the_previous_snapshot_listed_is_no_newcomer() {
         let mut lineage = Lineage::default();
         let events = [fork(1, 10, 100), exit(10, 1, 900)];
-        assert!(lineage.follow(&events, &listed()).is_empty());
+        assert!(follow(&mut lineage, &events, LISTED).is_empty());
     }
 
     #[test]
     fn a_process_with_no_listed_ancestor_has_no_program_to_credit() {
         let mut lineage = Lineage::default();
         let events = [fork(77, 78, 100), exit(78, 1, 900)];
-        assert!(lineage.follow(&events, &listed()).is_empty());
+        assert!(follow(&mut lineage, &events, LISTED).is_empty());
     }
 
     #[test]
     fn a_reset_forgets_every_newcomer() {
         let mut lineage = Lineage::default();
-        lineage.follow(&[fork(10, 20, 100)], &listed());
+        follow(&mut lineage, &[fork(10, 20, 100)], LISTED);
         lineage.reset();
-        assert!(lineage.follow(&[exit(20, 1, 900)], &listed()).is_empty());
+        assert!(follow(&mut lineage, &[exit(20, 1, 900)], LISTED).is_empty());
     }
 }

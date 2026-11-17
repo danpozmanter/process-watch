@@ -41,11 +41,13 @@ pub fn record(opts: &RecordOptions) -> Result<()> {
     }
 }
 
-/// Drops hours older than the retention and folds each hour older than a day
-/// into one bucket: minute detail is kept for the day reports look at most,
-/// and a month of hours stays small.
+/// Drops hours older than the retention, compresses each hour that has
+/// ended, and folds each hour older than a day into one bucket: minute
+/// detail is kept for the day reports look at most, and a month of hours
+/// stays small.
 fn tidy(dir: &Path, now_ms: i64, retain_ms: i64) -> Result<()> {
     store::prune(dir, now_ms - retain_ms)?;
+    store::pack(dir, now_ms)?;
     store::compact(dir, now_ms - DAY_MS)
 }
 
@@ -212,8 +214,8 @@ mod tests {
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].covered_ms, 10_000);
         assert_eq!(loaded[0].cpus, 4);
-        assert_eq!(loaded[0].usage["busy"].cpu_ns, 1_000_000_000);
-        assert_eq!(loaded[0].usage["busy"].peak_cpu_permille, 100);
+        assert_eq!(loaded[0].programs["busy"].usage.cpu_ns, 1_000_000_000);
+        assert_eq!(loaded[0].programs["busy"].usage.peak_cpu_permille, 100);
     }
 
     #[test]

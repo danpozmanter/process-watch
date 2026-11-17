@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -5,7 +6,7 @@ use anyhow::{Result, bail};
 
 use crate::sort_key::SortKey;
 use crate::span::{self, NS_PER_MS};
-use crate::store::{self, Bucket, RecorderLock, Usage};
+use crate::store::{self, Bucket, Program, RecorderLock, Usage};
 use crate::threshold::Threshold;
 use crate::{data_dir, size};
 
@@ -26,6 +27,8 @@ pub struct ReportOptions {
     /// Shows only programs whose name contains this, ignoring case.
     pub pattern: Option<String>,
     pub threshold: Option<Threshold>,
+    /// Shows each program's runs, and under it, its processes by name.
+    pub breakdown: bool,
     pub dir: Option<PathBuf>,
 }
 
@@ -37,7 +40,7 @@ const COLUMNS: [&str; 7] = [
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Row {
     name: String,
-    usage: Usage,
+    program: Program,
 }
 
 /// Everything recorded over a period, merged per program.
@@ -75,10 +78,10 @@ fn nothing_recorded(dir: &Path, period_ms: i64) -> String {
 
 /// Merges buckets per program: CPU time and memory-time add up, peaks take the largest.
 fn summarize(buckets: &[Bucket]) -> Summary {
-    let mut by_name: BTreeMap<&str, Usage> = BTreeMap::new();
+    let mut by_name: BTreeMap<&str, Program> = BTreeMap::new();
     for bucket in buckets {
-        for (name, usage) in &bucket.usage {
-            by_name.entry(name).or_default().absorb(usage);
+        for (name, program) in &bucket.programs {
+            by_name.entry(name).or_default().absorb(program);
         }
     }
     // The CPU count of the newest bucket, as the host has it now.
@@ -89,9 +92,9 @@ fn summarize(buckets: &[Bucket]) -> Summary {
     Summary {
         rows: by_name
             .into_iter()
-            .map(|(name, usage)| Row {
+            .map(|(name, program)| Row {
                 name: name.to_owned(),
-                usage,
+                program,
             })
             .collect(),
         covered_ms: buckets.iter().map(|b| b.covered_ms).sum(),
@@ -110,15 +113,14 @@ impl Summary {
                 .is_none_or(|p| row.name.to_lowercase().contains(p))
                 && opts
                     .threshold
-                    .is_none_or(|t| t.admits(&row.usage, covered_ms))
+                    .is_none_or(|t| t.admits(&row.program.usage, covered_ms))
         });
         self
     }
 }
 
-/// The row's ranking value, then its peak RAM and peak CPU to break ties.
-fn ranking_key(row: &Row, sort: SortKey) -> (i64, i64, i64) {
-    let usage = &row.usage;
+/// The usage's ranking value, then its peak RAM and peak CPU to break ties.
+fn ranking_key(usage: &Usage, sort: SortKey) -> (i64, i64, i64) {
     (
         sort.rank_value(usage),
         usage.peak_mem,
@@ -126,16 +128,26 @@ fn ranking_key(row: &Row, sort: SortKey) -> (i64, i64, i64) {
     )
 }
 
-/// The first `number` rows, ranked by `sort` in `order`; ties fall to the
-/// peaks, then to the name, so the ranking is the same on every run.
+/// Which of two named usages ranks first by `sort` in `order`; ties fall to
+/// the peaks, then to the name, so the ranking is the same on every run.
+fn ranked(a: (&str, &Usage), b: (&str, &Usage), sort: SortKey, order: Order) -> Ordering {
+    let by_usage = ranking_key(a.1, sort).cmp(&ranking_key(b.1, sort));
+    let directed = match order {
+        Order::Asc => by_usage,
+        Order::Desc => by_usage.reverse(),
+    };
+    directed.then_with(|| a.0.cmp(b.0))
+}
+
+/// The first `number` rows, ranked by `sort` in `order`.
 fn rank(mut rows: Vec<Row>, sort: SortKey, order: Order, number: usize) -> Vec<Row> {
     rows.sort_by(|a, b| {
-        let by_usage = ranking_key(a, sort).cmp(&ranking_key(b, sort));
-        let directed = match order {
-            Order::Asc => by_usage,
-            Order::Desc => by_usage.reverse(),
-        };
-        directed.then_with(|| a.name.cmp(&b.name))
+        ranked(
+            (&a.name, &a.program.usage),
+            (&b.name, &b.program.usage),
+            sort,
+            order,
+        )
     });
     rows.truncate(number);
     rows
@@ -170,12 +182,10 @@ fn percent(permille: f64) -> String {
     format!("{:.1}%", permille / 10.0)
 }
 
-/// The table cells of one row, over `covered_ms` of recording.
-fn cells(row: &Row, covered_ms: i64) -> Vec<String> {
-    let u = &row.usage;
+/// The number cells of one usage, over `covered_ms` of recording.
+fn usage_cells(u: &Usage, covered_ms: i64) -> [String; 6] {
     let avg_cpu_permille = u.cpu_ns as f64 * 1000.0 / (covered_ms * NS_PER_MS) as f64;
-    vec![
-        row.name.clone(),
+    [
         u.peak_procs.to_string(),
         span::format(u.cpu_ns / NS_PER_MS),
         percent(avg_cpu_permille),
@@ -185,10 +195,68 @@ fn cells(row: &Row, covered_ms: i64) -> Vec<String> {
     ]
 }
 
+/// A table line: the name, the runs cell when there is a RUNS column, then the numbers.
+fn line(name: String, runs: Option<String>, numbers: [String; 6]) -> Vec<String> {
+    std::iter::once(name).chain(runs).chain(numbers).collect()
+}
+
+/// The table's lines for one program: its own, then with a breakdown, its parts.
+fn program_lines(row: &Row, opts: &ReportOptions, covered_ms: i64) -> Vec<Vec<String>> {
+    let program = &row.program;
+    let numbers = usage_cells(&program.usage, covered_ms);
+    if !opts.breakdown {
+        return vec![line(row.name.clone(), None, numbers)];
+    }
+    let runs = match program.peak_runs {
+        0 => "-".to_owned(),
+        runs => runs.to_string(),
+    };
+    let mut lines = vec![line(row.name.clone(), Some(runs), numbers)];
+    lines.extend(part_lines(row, opts, covered_ms));
+    lines
+}
+
+/// The program's processes by name, indented and ranked as the programs
+/// are, then what was recorded without a breakdown; nothing when its one
+/// process name is its own.
+fn part_lines(row: &Row, opts: &ReportOptions, covered_ms: i64) -> Vec<Vec<String>> {
+    let program = &row.program;
+    let unbroken = Some(program.unbroken_down()).filter(|u| u.cpu_ns > 0 || u.mem_byte_ms > 0);
+    if unbroken.is_none() && program.parts.len() == 1 && program.parts.contains_key(&row.name) {
+        return Vec::new();
+    }
+    let mut parts: Vec<(&str, &Usage)> = program
+        .parts
+        .iter()
+        .map(|(name, usage)| (name.as_str(), usage))
+        .collect();
+    parts.sort_by(|&a, &b| ranked(a, b, opts.sort, opts.order));
+    let mut lines: Vec<Vec<String>> = parts
+        .into_iter()
+        .map(|(name, usage)| {
+            line(
+                format!("  {name}"),
+                Some(String::new()),
+                usage_cells(usage, covered_ms),
+            )
+        })
+        .collect();
+    if let Some(unbroken) = unbroken {
+        let [_, cpu_time, avg_cpu, _, avg_ram, _] = usage_cells(&unbroken, covered_ms);
+        let none = || "-".to_owned();
+        let numbers = [none(), cpu_time, avg_cpu, none(), avg_ram, none()];
+        lines.push(line(UNBROKEN.to_owned(), Some(String::new()), numbers));
+    }
+    lines
+}
+
+/// The name of the line holding what a recorder older than the breakdown kept.
+const UNBROKEN: &str = "  (no breakdown)";
+
 /// The table as text: the first column aligned left, the others right,
 /// two spaces between columns.
 fn align(table: &[Vec<String>]) -> String {
-    let mut widths = vec![0usize; COLUMNS.len()];
+    let mut widths = vec![0usize; table.first().map_or(0, Vec::len)];
     for line in table {
         for (width, cell) in widths.iter_mut().zip(line) {
             *width = (*width).max(cell.chars().count());
@@ -218,8 +286,14 @@ fn render(summary: &Summary, ranked: &[Row], opts: &ReportOptions) -> String {
         return format!("{}\n", heading.trim_end());
     }
     let covered_ms = summary.covered_ms.max(1);
-    let mut table = vec![COLUMNS.map(str::to_owned).to_vec()];
-    table.extend(ranked.iter().map(|row| cells(row, covered_ms)));
+    let mut header: Vec<String> = COLUMNS.map(str::to_owned).to_vec();
+    if opts.breakdown {
+        header.insert(1, "RUNS".to_owned());
+    }
+    let mut table = vec![header];
+    for row in ranked {
+        table.extend(program_lines(row, opts, covered_ms));
+    }
     heading + &align(&table)
 }
 
@@ -228,18 +302,26 @@ mod tests {
     use std::fs;
 
     use super::*;
-    use crate::store::decode;
+    use crate::store::{Units, decode};
 
     fn row(name: &str, peak_cpu_permille: i64, peak_mem: i64) -> Row {
         Row {
             name: name.to_owned(),
-            usage: Usage {
-                peak_cpu_permille,
-                peak_mem,
-                peak_procs: 1,
-                ..Usage::default()
+            program: Program {
+                usage: Usage {
+                    peak_cpu_permille,
+                    peak_mem,
+                    peak_procs: 1,
+                    ..Usage::default()
+                },
+                ..Program::default()
             },
         }
+    }
+
+    /// Buckets written in exact units, so each amount reads as it stands.
+    fn exact(text: &str) -> Vec<Bucket> {
+        decode(text, Units::Exact)
     }
 
     fn names(rows: &[Row]) -> Vec<&str> {
@@ -254,6 +336,7 @@ mod tests {
             period_ms: 3_600_000,
             pattern: None,
             threshold: None,
+            breakdown: false,
             dir,
         }
     }
@@ -284,8 +367,8 @@ mod tests {
     #[test]
     fn ranking_follows_peaks_not_totals_or_averages() {
         let mut steady = row("steady", 100, 100);
-        steady.usage.cpu_ns = 1_000_000_000_000;
-        steady.usage.mem_byte_ms = 1_000_000_000_000;
+        steady.program.usage.cpu_ns = 1_000_000_000_000;
+        steady.program.usage.mem_byte_ms = 1_000_000_000_000;
         let rows = vec![steady, row("spiky", 900, 900)];
         assert_eq!(
             names(&rank(rows.clone(), SortKey::PeakCpu, Order::Desc, 1)),
@@ -300,12 +383,12 @@ mod tests {
     #[test]
     fn ranking_by_averages_and_totals_follows_what_was_used_over_the_period() {
         let mut steady = row("steady", 100, 100);
-        steady.usage.cpu_ns = 50;
-        steady.usage.mem_byte_ms = 50;
+        steady.program.usage.cpu_ns = 50;
+        steady.program.usage.mem_byte_ms = 50;
         let mut spiky = row("spiky", 900, 900);
-        spiky.usage.cpu_ns = 10;
-        spiky.usage.mem_byte_ms = 10;
-        spiky.usage.peak_procs = 3;
+        spiky.program.usage.cpu_ns = 10;
+        spiky.program.usage.mem_byte_ms = 10;
+        spiky.program.usage.peak_procs = 3;
         let rows = vec![spiky, steady];
         for key in [SortKey::AvgRam, SortKey::AvgCpu, SortKey::CpuTime] {
             assert_eq!(names(&rank(rows.clone(), key, Order::Desc, 1)), ["steady"]);
@@ -318,14 +401,14 @@ mod tests {
 
     #[test]
     fn summaries_add_usage_and_keep_the_largest_peaks() {
-        let buckets = decode(
+        let buckets = exact(
             "B\t1\t60000\t1000\t4\nG\t2000000000\t2000\t50000\t50\t3\tweb\n\
              B\t2\t120000\t1000\t8\nG\t500000000\t500\t80000\t80\t5\tweb\n",
         );
         let summary = summarize(&buckets);
         assert_eq!(summary.covered_ms, 2000);
         assert_eq!(summary.cpus, 8);
-        let web = summary.rows[0].usage;
+        let web = summary.rows[0].program.usage;
         assert_eq!(web.cpu_ns, 2_500_000_000);
         assert_eq!(web.peak_cpu_permille, 2000);
         assert_eq!(web.mem_byte_ms, 130_000);
@@ -335,7 +418,7 @@ mod tests {
 
     #[test]
     fn the_table_aligns_names_left_and_numbers_right() {
-        let summary = summarize(&decode(
+        let summary = summarize(&exact(
             "B\t1\t60000\t60000\t4\n\
              G\t30000000000\t900\t60000000000\t2000000\t2\tfirefox\n\
              G\t0\t0\t6000000\t100\t1\tsh\n",
@@ -368,7 +451,7 @@ mod tests {
 
     #[test]
     fn patterns_match_any_part_of_a_name_ignoring_case() {
-        let summary = summarize(&decode(
+        let summary = summarize(&exact(
             "B\t1\t60000\t60000\t4\n\
              G\t0\t0\t60000\t1\t1\tfirefox-bin\n\
              G\t0\t0\t60000\t1\t1\tFirefox\n\
@@ -386,7 +469,7 @@ mod tests {
 
     #[test]
     fn thresholds_keep_programs_on_their_side_of_the_limit() {
-        let summary = summarize(&decode(
+        let summary = summarize(&exact(
             "B\t1\t60000\t60000\t4\n\
              G\t0\t0\t1000\t2000\t1\tbig\n\
              G\t0\t0\t9000000\t1000\t1\tsmall\n",
@@ -455,5 +538,98 @@ mod tests {
         let shown = report(&options(Some(dir.clone()))).unwrap();
         fs::remove_dir_all(&dir).unwrap();
         assert!(shown.contains("\nediting "), "{shown}");
+    }
+
+    /// A minute with three cargo builds at once, and a shell of one process.
+    const BUILDS: &str = "B\t1\t60000\t60000\t4\n\
+         G\t30000000000\t900\t60000000000\t2000000\t9\tcargo\n\
+         R\t3\n\
+         P\t3000000000\t100\t6000000000\t200000\t3\tcargo\n\
+         P\t27000000000\t800\t54000000000\t1800000\t6\trustc\n\
+         G\t0\t0\t6000000\t100\t1\tsh\n\
+         R\t1\n";
+
+    fn rendered(text: &str, opts: &ReportOptions) -> String {
+        let summary = summarize(&exact(text)).filtered(opts);
+        let ranked = rank(summary.rows.clone(), opts.sort, opts.order, opts.number);
+        render(&summary, &ranked, opts)
+    }
+
+    #[test]
+    fn a_breakdown_shows_runs_and_each_process_name_under_its_program() {
+        let opts = ReportOptions {
+            breakdown: true,
+            ..options(None)
+        };
+        assert_eq!(
+            rendered(BUILDS, &opts),
+            "Past 1h: 1m recorded, 4 CPUs (100% CPU = one core)\n\
+             Top 2 of 2 programs by peak RAM, highest first\n\
+             \n\
+             PROGRAM  RUNS  PROCS  CPU TIME  AVG CPU  PEAK CPU    AVG RAM   PEAK RAM\n\
+             cargo       3      9       30s    50.0%     90.0%  976.6 KiB    1.9 MiB\n\
+             \x20 rustc            6       27s    45.0%     80.0%  878.9 KiB    1.7 MiB\n\
+             \x20 cargo            3        3s     5.0%     10.0%   97.7 KiB  195.3 KiB\n\
+             sh          1      1       0ms     0.0%      0.0%      100 B      100 B\n"
+        );
+    }
+
+    #[test]
+    fn a_breakdown_follows_the_sort_and_order() {
+        let opts = ReportOptions {
+            breakdown: true,
+            sort: SortKey::PeakCpu,
+            order: Order::Asc,
+            pattern: Some("car".to_owned()),
+            ..options(None)
+        };
+        let shown = rendered(BUILDS, &opts);
+        let names: Vec<&str> = shown
+            .lines()
+            .skip(4)
+            .filter_map(|l| l.split("  ").find(|cell| !cell.is_empty()))
+            .collect();
+        assert_eq!(names, ["cargo", "cargo", "rustc"]);
+    }
+
+    #[test]
+    fn a_breakdown_shows_what_an_older_recorder_kept_on_a_line_of_its_own() {
+        let older = "B\t0\t0\t60000\t4\nG\t6000000000\t100\t6000000000\t100000\t2\tcargo\n";
+        let opts = ReportOptions {
+            breakdown: true,
+            pattern: Some("cargo".to_owned()),
+            ..options(None)
+        };
+        let shown = rendered(&format!("{older}{BUILDS}"), &opts);
+        assert!(
+            shown.ends_with(
+                "\n  (no breakdown)            -        6s     5.0%         -   48.8 KiB          -\n"
+            ),
+            "{shown}"
+        );
+        assert!(
+            shown.contains("\ncargo                3      9       36s"),
+            "{shown}"
+        );
+        assert!(
+            shown.contains("\n  rustc                     6       27s"),
+            "{shown}"
+        );
+    }
+
+    #[test]
+    fn a_program_that_is_only_itself_has_nothing_under_it() {
+        let opts = ReportOptions {
+            breakdown: true,
+            pattern: Some("sh".to_owned()),
+            ..options(None)
+        };
+        let shown = rendered(BUILDS, &opts);
+        assert!(
+            shown.ends_with(
+                "\nsh          1      1       0ms     0.0%      0.0%    100 B     100 B\n"
+            ),
+            "{shown}"
+        );
     }
 }
