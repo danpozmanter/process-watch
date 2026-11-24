@@ -1,14 +1,16 @@
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 
+use crate::accounting::Ledger;
 use crate::sort_key::SortKey;
 use crate::span::{self, NS_PER_MS};
 use crate::store::{self, Bucket, Program, RecorderLock, Usage};
 use crate::threshold::Threshold;
-use crate::{data_dir, size};
+use crate::{data_dir, rollup, size, snapshot};
 
 /// Which end of the ranking comes first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,12 +31,21 @@ pub struct ReportOptions {
     pub threshold: Option<Threshold>,
     /// Shows each program's runs, and under it, its processes by name.
     pub breakdown: bool,
+    /// Samples every process now instead of reading what the recorder saw.
+    pub current: bool,
     pub dir: Option<PathBuf>,
 }
 
 const COLUMNS: [&str; 7] = [
     "PROGRAM", "PROCS", "CPU TIME", "AVG CPU", "PEAK CPU", "AVG RAM", "PEAK RAM",
 ];
+
+const CURRENT_COLUMNS: [&str; 4] = ["PROGRAM", "PROCS", "CPU", "RAM"];
+
+/// How long a current report measures CPU over. CPU use is a rate, so it
+/// takes two snapshots; a second spans enough clock ticks to resolve 1% of
+/// a core on every platform while keeping the wait short.
+const CURRENT_WINDOW: Duration = Duration::from_secs(1);
 
 /// One program's usage over the whole period.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,16 +62,45 @@ struct Summary {
     cpus: i64,
 }
 
-/// The report for the period ending now, or an error saying why there is nothing to show.
+/// The report for the period ending now, or for this moment with `current`,
+/// or an error saying why there is nothing to show.
 pub fn report(opts: &ReportOptions) -> Result<String> {
+    let buckets = if opts.current {
+        vec![sample_now()?]
+    } else {
+        recorded(opts)?
+    };
+    let summary = summarize(&buckets).filtered(opts);
+    let ranked = rank(summary.rows.clone(), opts.sort, opts.order, opts.number);
+    Ok(render(&summary, &ranked, opts))
+}
+
+/// Every bucket recorded over the report's period.
+fn recorded(opts: &ReportOptions) -> Result<Vec<Bucket>> {
     let dir = data_dir::resolve(opts.dir.as_deref())?;
     let buckets = store::load(&dir, store::now_ms() - opts.period_ms)?;
     if buckets.is_empty() {
         bail!(nothing_recorded(&dir, opts.period_ms));
     }
-    let summary = summarize(&buckets).filtered(opts);
-    let ranked = rank(summary.rows.clone(), opts.sort, opts.order, opts.number);
-    Ok(render(&summary, &ranked, opts))
+    Ok(buckets)
+}
+
+/// One bucket holding what every program uses now: CPU over the window
+/// between two snapshots, and memory and processes at the second.
+fn sample_now() -> Result<Bucket> {
+    let mut lister = snapshot::Lister::new();
+    let mut ledger = Ledger::default();
+    let started = Instant::now();
+    let baseline = lister.take().context("listing processes")?;
+    ledger.tally(&baseline, &rollup::program_roots(&baseline.procs));
+    std::thread::sleep(CURRENT_WINDOW.saturating_sub(started.elapsed()));
+    let ended = Instant::now();
+    let snap = lister.take().context("listing processes")?;
+    let usage = ledger.tally(&snap, &rollup::program_roots(&snap.procs));
+    let window_ms = i64::try_from((ended - started).as_millis()).unwrap_or(i64::MAX);
+    let mut bucket = Bucket::open(store::now_ms(), snapshot::cpu_count());
+    bucket.add(window_ms.max(1), &usage);
+    Ok(bucket)
 }
 
 fn nothing_recorded(dir: &Path, period_ms: i64) -> String {
@@ -156,7 +196,11 @@ fn rank(mut rows: Vec<Row>, sort: SortKey, order: Order, number: usize) -> Vec<R
 /// The two header lines naming the period, the coverage, the ranking, and
 /// any pattern and threshold the programs were chosen by.
 fn heading(summary: &Summary, shown: usize, opts: &ReportOptions) -> String {
-    let measure = opts.sort.label();
+    let measure = if opts.current {
+        opts.sort.label_now()
+    } else {
+        opts.sort.label()
+    };
     let direction = match opts.order {
         Order::Desc => "highest",
         Order::Asc => "lowest",
@@ -166,13 +210,25 @@ fn heading(summary: &Summary, shown: usize, opts: &ReportOptions) -> String {
         chosen_by.push_str(&format!(", matching `{pattern}`"));
     }
     if let Some(threshold) = opts.threshold {
-        chosen_by.push_str(&format!(", with {}", threshold.describe()));
+        let described = if opts.current {
+            threshold.describe_now()
+        } else {
+            threshold.describe()
+        };
+        chosen_by.push_str(&format!(", with {described}"));
     }
+    let span = if opts.current {
+        format!("Now: CPU over {}", span::format(summary.covered_ms))
+    } else {
+        format!(
+            "Past {}: {} recorded",
+            span::format(opts.period_ms),
+            span::format(summary.covered_ms)
+        )
+    };
     format!(
-        "Past {}: {} recorded, {} CPUs (100% CPU = one core)\n\
+        "{span}, {} CPUs (100% CPU = one core)\n\
          Top {shown} of {} programs by {measure}, {direction} first{chosen_by}\n\n",
-        span::format(opts.period_ms),
-        span::format(summary.covered_ms),
         summary.cpus,
         summary.rows.len(),
     )
@@ -182,8 +238,28 @@ fn percent(permille: f64) -> String {
     format!("{:.1}%", permille / 10.0)
 }
 
+/// The number cells of one usage: over `covered_ms` of recording, or for a
+/// current report, at the moment sampled.
+fn usage_cells(u: &Usage, covered_ms: i64, current: bool) -> Vec<String> {
+    if current {
+        current_cells(u).into()
+    } else {
+        recorded_cells(u, covered_ms).into()
+    }
+}
+
+/// The number cells of a usage sampled over one window, whose peaks are
+/// the moment's amounts.
+fn current_cells(u: &Usage) -> [String; 3] {
+    [
+        u.peak_procs.to_string(),
+        percent(u.peak_cpu_permille as f64),
+        size::format(u.peak_mem),
+    ]
+}
+
 /// The number cells of one usage, over `covered_ms` of recording.
-fn usage_cells(u: &Usage, covered_ms: i64) -> [String; 6] {
+fn recorded_cells(u: &Usage, covered_ms: i64) -> [String; 6] {
     let avg_cpu_permille = u.cpu_ns as f64 * 1000.0 / (covered_ms * NS_PER_MS) as f64;
     [
         u.peak_procs.to_string(),
@@ -196,14 +272,14 @@ fn usage_cells(u: &Usage, covered_ms: i64) -> [String; 6] {
 }
 
 /// A table line: the name, the runs cell when there is a RUNS column, then the numbers.
-fn line(name: String, runs: Option<String>, numbers: [String; 6]) -> Vec<String> {
+fn line(name: String, runs: Option<String>, numbers: Vec<String>) -> Vec<String> {
     std::iter::once(name).chain(runs).chain(numbers).collect()
 }
 
 /// The table's lines for one program: its own, then with a breakdown, its parts.
 fn program_lines(row: &Row, opts: &ReportOptions, covered_ms: i64) -> Vec<Vec<String>> {
     let program = &row.program;
-    let numbers = usage_cells(&program.usage, covered_ms);
+    let numbers = usage_cells(&program.usage, covered_ms, opts.current);
     if !opts.breakdown {
         return vec![line(row.name.clone(), None, numbers)];
     }
@@ -218,10 +294,12 @@ fn program_lines(row: &Row, opts: &ReportOptions, covered_ms: i64) -> Vec<Vec<St
 
 /// The program's processes by name, indented and ranked as the programs
 /// are, then what was recorded without a breakdown; nothing when its one
-/// process name is its own.
+/// process name is its own. A current report samples every process by
+/// name, so only recordings have usage without a breakdown.
 fn part_lines(row: &Row, opts: &ReportOptions, covered_ms: i64) -> Vec<Vec<String>> {
     let program = &row.program;
-    let unbroken = Some(program.unbroken_down()).filter(|u| u.cpu_ns > 0 || u.mem_byte_ms > 0);
+    let unbroken = Some(program.unbroken_down())
+        .filter(|u| !opts.current && (u.cpu_ns > 0 || u.mem_byte_ms > 0));
     if unbroken.is_none() && program.parts.len() == 1 && program.parts.contains_key(&row.name) {
         return Vec::new();
     }
@@ -237,14 +315,14 @@ fn part_lines(row: &Row, opts: &ReportOptions, covered_ms: i64) -> Vec<Vec<Strin
             line(
                 format!("  {name}"),
                 Some(String::new()),
-                usage_cells(usage, covered_ms),
+                usage_cells(usage, covered_ms, opts.current),
             )
         })
         .collect();
     if let Some(unbroken) = unbroken {
-        let [_, cpu_time, avg_cpu, _, avg_ram, _] = usage_cells(&unbroken, covered_ms);
+        let [_, cpu_time, avg_cpu, _, avg_ram, _] = recorded_cells(&unbroken, covered_ms);
         let none = || "-".to_owned();
-        let numbers = [none(), cpu_time, avg_cpu, none(), avg_ram, none()];
+        let numbers = vec![none(), cpu_time, avg_cpu, none(), avg_ram, none()];
         lines.push(line(UNBROKEN.to_owned(), Some(String::new()), numbers));
     }
     lines
@@ -286,7 +364,12 @@ fn render(summary: &Summary, ranked: &[Row], opts: &ReportOptions) -> String {
         return format!("{}\n", heading.trim_end());
     }
     let covered_ms = summary.covered_ms.max(1);
-    let mut header: Vec<String> = COLUMNS.map(str::to_owned).to_vec();
+    let columns: &[&str] = if opts.current {
+        &CURRENT_COLUMNS
+    } else {
+        &COLUMNS
+    };
+    let mut header: Vec<String> = columns.iter().map(|&c| c.to_owned()).collect();
     if opts.breakdown {
         header.insert(1, "RUNS".to_owned());
     }
@@ -337,6 +420,7 @@ mod tests {
             pattern: None,
             threshold: None,
             breakdown: false,
+            current: false,
             dir,
         }
     }
@@ -613,6 +697,57 @@ mod tests {
         );
         assert!(
             shown.contains("\n  rustc                     6       27s"),
+            "{shown}"
+        );
+    }
+
+    #[test]
+    fn a_current_report_shows_each_program_and_its_processes_at_the_moment() {
+        let opts = ReportOptions {
+            breakdown: true,
+            current: true,
+            threshold: Threshold::parse(">0.001mb", SortKey::PeakRam),
+            ..options(None)
+        };
+        let moment = "B\t1\t60000\t1000\t4\n\
+             G\t900000000\t900\t2000000000\t2000000\t9\tcargo\n\
+             R\t3\n\
+             P\t100000000\t100\t200000000\t200000\t3\tcargo\n\
+             P\t800000000\t800\t1800000000\t1800000\t6\trustc\n\
+             G\t0\t0\t100000\t100\t1\tsh\n\
+             R\t1\n";
+        assert_eq!(
+            rendered(moment, &opts),
+            "Now: CPU over 1s, 4 CPUs (100% CPU = one core)\n\
+             Top 1 of 1 programs by RAM, highest first, with RAM above 1.0 KiB\n\
+             \n\
+             PROGRAM  RUNS  PROCS    CPU        RAM\n\
+             cargo       3      9  90.0%    1.9 MiB\n\
+             \x20 rustc            6  80.0%    1.7 MiB\n\
+             \x20 cargo            3  10.0%  195.3 KiB\n"
+        );
+    }
+
+    #[test]
+    fn a_current_report_samples_every_program_without_a_recording() {
+        let dir = std::env::temp_dir().join(format!("pw-report-none-{}", std::process::id()));
+        let opts = ReportOptions {
+            current: true,
+            breakdown: true,
+            number: usize::MAX,
+            ..options(Some(dir))
+        };
+        let shown = report(&opts).unwrap();
+        assert!(shown.starts_with("Now: CPU over 1s, "), "{shown}");
+        let header = shown.lines().nth(3).unwrap_or_default();
+        assert_eq!(
+            header.split_whitespace().collect::<Vec<_>>(),
+            ["PROGRAM", "RUNS", "PROCS", "CPU", "RAM"],
+            "{shown}"
+        );
+        // This test runs in a process whose name starts with the binary's, `pw`.
+        assert!(
+            shown.lines().any(|l| l.trim_start().starts_with("pw")),
             "{shown}"
         );
     }

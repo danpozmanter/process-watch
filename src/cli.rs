@@ -36,6 +36,9 @@ Report options:
                          the --sort column; RUNS counts the copies of the
                          program started apart (such as builds in different
                          terminals) running at once, at most
+  -c, --current          what each program uses now, without the recorder:
+                         CPU over the next second and RAM at its end; takes
+                         no --period, and no --sort cpu-time
 
 Record options:
   -i, --interval SPAN    time between samples, e.g. 5s, 30s (default 5s)
@@ -137,6 +140,8 @@ struct Parsed {
     dir: Option<PathBuf>,
     /// The threshold flag as given and its value, read once the sort is known.
     threshold: Option<(String, String)>,
+    /// The period flag as given, which `--current` refuses.
+    period_flag: Option<String>,
     clear: bool,
     /// The last report option given, which `--clear` refuses.
     report_flag: Option<String>,
@@ -154,6 +159,7 @@ impl Parsed {
                 pattern: None,
                 threshold: None,
                 breakdown: false,
+                current: false,
                 dir: None,
             },
             record: RecordOptions {
@@ -163,6 +169,7 @@ impl Parsed {
             },
             dir: None,
             threshold: None,
+            period_flag: None,
             clear: false,
             report_flag: None,
         }
@@ -217,7 +224,10 @@ impl Parsed {
             Flag::Number => self.report.number = count_arg(name, value)?,
             Flag::Sort => self.report.sort = sort_arg(name, value)?,
             Flag::Order => self.report.order = order_arg(name, value)?,
-            Flag::Period => self.report.period_ms = span_arg(name, value, HOUR_MS, MAX_RETAIN_MS)?,
+            Flag::Period => {
+                self.report.period_ms = span_arg(name, value, HOUR_MS, MAX_RETAIN_MS)?;
+                self.period_flag = Some(name.to_owned());
+            }
             Flag::Threshold => self.threshold = Some((name.to_owned(), value.to_owned())),
             Flag::Interval => self.record.interval_ms = span_arg(name, value, SECOND_MS, HOUR_MS)?,
             Flag::Retain => self.record.retain_ms = span_arg(name, value, HOUR_MS, MAX_RETAIN_MS)?,
@@ -232,6 +242,16 @@ impl Parsed {
                 Some(flag) => Err(format!("--clear takes no report options; got `{flag}`")),
                 None => Ok(Command::Clear(self.dir)),
             };
+        }
+        if self.report.current {
+            if let Some(flag) = self.period_flag {
+                return Err(format!(
+                    "--current samples now and takes no period; got `{flag}`"
+                ));
+            }
+            if self.report.sort == SortKey::CpuTime {
+                return Err("--current shows no CPU time; sort by ram, cpu, or procs".to_owned());
+            }
         }
         Ok(match self.mode {
             Mode::Report => Command::Report(ReportOptions {
@@ -265,6 +285,10 @@ pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command, Str
             "--clear" if mode == Mode::Report => parsed.clear = true,
             "-b" | "--breakdown" if mode == Mode::Report => {
                 parsed.report.breakdown = true;
+                parsed.report_flag = Some(arg);
+            }
+            "-c" | "--current" if mode == Mode::Report => {
+                parsed.report.current = true;
                 parsed.report_flag = Some(arg);
             }
             "--" if mode == Mode::Report => {
@@ -369,7 +393,41 @@ mod tests {
         assert_eq!(opts.pattern, None);
         assert_eq!(opts.threshold, None);
         assert!(!opts.breakdown);
+        assert!(!opts.current);
         assert_eq!(opts.dir, None);
+    }
+
+    #[test]
+    fn only_a_report_samples_the_current_moment() {
+        assert!(report_of(&["-c"]).current);
+        let opts = report_of(&["--current", "-b", "-s", "cpu", "-t", ">50%", "fire"]);
+        assert!(opts.current && opts.breakdown);
+        assert_eq!(opts.sort, SortKey::PeakCpu);
+        assert_eq!(opts.pattern.as_deref(), Some("fire"));
+        assert_eq!(
+            error_of(&["record", "-c"]),
+            "pw record does not take `-c`; see --help"
+        );
+        assert_eq!(
+            error_of(&["--clear", "--current"]),
+            "--clear takes no report options; got `--current`"
+        );
+    }
+
+    #[test]
+    fn the_current_moment_has_no_period_or_cpu_time() {
+        assert_eq!(
+            error_of(&["-c", "-p", "2h"]),
+            "--current samples now and takes no period; got `-p`"
+        );
+        assert_eq!(
+            error_of(&["--period=1d", "--current"]),
+            "--current samples now and takes no period; got `--period`"
+        );
+        assert_eq!(
+            error_of(&["-c", "-s", "cpu-time"]),
+            "--current shows no CPU time; sort by ram, cpu, or procs"
+        );
     }
 
     #[test]

@@ -66,6 +66,15 @@ impl Threshold {
 
     /// The threshold in words, such as `peak RAM above 1.0 GiB`.
     pub fn describe(&self) -> String {
+        self.describe_as(self.key.label())
+    }
+
+    /// The threshold in words for a current report, such as `RAM above 1.0 GiB`.
+    pub fn describe_now(&self) -> String {
+        self.describe_as(self.key.label_now())
+    }
+
+    fn describe_as(&self, measure: &str) -> String {
         let bound = match self.bound {
             Bound::Above => "above",
             Bound::Below => "below",
@@ -76,7 +85,7 @@ impl Threshold {
             Unit::Span => span::format(self.limit),
             Unit::Count => self.limit.to_string(),
         };
-        format!("{} {bound} {limit}", self.key.label())
+        format!("{measure} {bound} {limit}")
     }
 }
 

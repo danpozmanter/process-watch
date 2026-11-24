@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.0
+
+- `-c`/`--current` shows what each program uses now, CPU over one second and RAM at its end, without the recorder; with `-b` it lists each program's processes by name and the copies running now.
+
 ## 0.5.0
 
 - `-b`/`--breakdown` lists each program's processes by name under it, and adds RUNS, the most copies of the program started apart running at once.

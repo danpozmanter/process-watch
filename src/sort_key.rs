@@ -73,6 +73,17 @@ impl SortKey {
         }
     }
 
+    /// The measure in words, as a current report heading names it: over one
+    /// moment, a peak and an average are the same amount.
+    pub fn label_now(self) -> &'static str {
+        match self {
+            SortKey::PeakRam | SortKey::AvgRam => "RAM",
+            SortKey::PeakCpu | SortKey::AvgCpu => "CPU",
+            SortKey::CpuTime => "CPU time",
+            SortKey::Procs => "process count",
+        }
+    }
+
     /// How a threshold on this key writes its limit.
     pub fn unit(self) -> Unit {
         match self {

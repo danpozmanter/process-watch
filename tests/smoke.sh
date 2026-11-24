@@ -86,6 +86,11 @@ rows=$("$bin" -d "$data" -s cpu -n 3 | awk 'f { n++ } /^PROGRAM / { f = 1 } END 
 "$bin" -d "$data" -b | grep -q '^[^ ].*  [1-9][0-9]*  *[1-9]' || fail "-b counts each program's runs"
 pass "report"
 
+"$bin" -c | grep -q '^Now: CPU over 1s, ' || fail "-c samples the current moment"
+"$bin" -c -b | grep -q '^PROGRAM  *RUNS  *PROCS  *CPU  *RAM$' || fail "-c -b adds a RUNS column"
+"$bin" -c -s cpu -t '<100000%' | grep -q '^PROGRAM ' || fail "every program is below 100000% CPU now"
+pass "current"
+
 "$bin" -d "$data" -t '<1tb' | grep -q '^PROGRAM ' || fail "every program is below 1 TiB of RAM"
 "$bin" -d "$data" -s procs -t '>0' | grep -q '^PROGRAM ' || fail "every program had a process"
 "$bin" -d "$data" -s cpu -t '>100000%' | grep -q '^PROGRAM ' && fail "no program is above 100000% CPU"

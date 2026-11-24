@@ -11,6 +11,7 @@ Runs on Linux, macOS, Windows, and FreeBSD. Written in Rust, as one binary:
   required: no operating system records peak CPU, or anything about programs
   that have already exited, so something has to sample.
 - `pw` reports on what the recorder saved.
+- `pw -c` shows what each program uses right now, recorder or not.
 
 ```
 $ pw
@@ -27,6 +28,7 @@ cargo                 14   23m 10s    38.6%   2280.5%    1.2 GiB    3.9 GiB
 
 ```
 pw [-n N] [-s COLUMN] [-o desc|asc] [-p SPAN] [-t LIMIT] [-b] [-d DIR] [PATTERN]
+pw -c [-n N] [-s COLUMN] [-o desc|asc] [-t LIMIT] [-b] [PATTERN]
 pw --clear [-d DIR]
 pw record [-i SPAN] [-r SPAN] [-d DIR]
 ```
@@ -39,6 +41,7 @@ pw record [-i SPAN] [-r SPAN] [-d DIR]
 | `-p`, `--period` | how far back to look, from `1h` up to `30d` | `1h` |
 | `-t`, `--threshold` | show only programs above (`>`) or below (`<`) a limit on the `--sort` column; see below | |
 | `-b`, `--breakdown` | under each program, its processes by name; see below | |
+| `-c`, `--current` | what each program uses now, without the recorder; see below | |
 | `PATTERN` | show only programs whose name contains it, ignoring case | |
 | `--clear` | delete every recording | |
 | `-i`, `--interval` | (record) time between samples | `5s` |
@@ -93,6 +96,27 @@ cargo       3     15    3h 20m   666.7%   2200.0%   20.0 GiB   33.0 GiB
 CPU time and averages of the processes add up to the program's. Each keeps
 its own peaks, which may come at different moments. Time recorded by a `pw`
 older than 0.5.0 has no breakdown, and shows as `(no breakdown)`.
+
+`-c` samples every process itself and shows what each program uses at this
+moment: CPU over the next second, and RAM and processes at its end. It needs
+no recorder, so it takes no `--period`. `--sort` and `--threshold` work as
+above, with `ram` and `cpu` meaning the moment's amounts (`cpu-time` is
+refused), and `-b` breaks each program down by process name, with RUNS the
+copies running now:
+
+```
+$ pw -c -b -n 2
+Now: CPU over 1s, 24 CPUs (100% CPU = one core)
+Top 2 of 123 programs by RAM, highest first
+
+PROGRAM            RUNS  PROCS   CPU        RAM
+firefox-bin           1     31  6.0%    8.9 GiB
+  Isolated Web Co           20  2.0%    7.1 GiB
+  firefox-bin                1  4.0%    1.4 GiB
+  WebExtensions              1  0.0%  159.3 MiB
+  ...
+claude                3      3  3.0%  910.1 MiB
+```
 
 Run the recorder as a background service (below). A report covers only time
 the recorder was running, and its header says how much of the period that was.

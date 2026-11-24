@@ -260,6 +260,25 @@ fn a_breakdown_shows_how_many_builds_ran_and_what_they_ran() {
 }
 
 #[test]
+fn the_current_moment_needs_no_recording_and_lists_pw_itself() {
+    let scratch = Scratch::new("current");
+    let output = run(&scratch.0, &["-c", "-b", "-n", "100000"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let report = stdout(&output);
+    assert!(report.starts_with("Now: CPU over 1s, "), "{report}");
+    assert!(
+        table_rows(&report)
+            .iter()
+            .any(|row| row.trim_start().starts_with("pw")),
+        "{report}"
+    );
+
+    let period = run(&scratch.0, &["-c", "-p", "2h"]);
+    assert_eq!(period.status.code(), Some(2));
+    assert!(stderr(&period).contains("takes no period"));
+}
+
+#[test]
 fn a_report_reads_what_an_older_recorder_kept() {
     let scratch = Scratch::new("legacy");
     let data = scratch.path("data");

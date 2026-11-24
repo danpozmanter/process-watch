@@ -1,6 +1,6 @@
 [package]
 name = "process-watch"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 rust-version = "1.85"
 description = "Top programs by peak RAM or peak CPU over the past hours, with subprocesses rolled into the program that ran them"
