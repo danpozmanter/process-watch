@@ -51,6 +51,9 @@ Both:
   -h, --help             show this help
   -V, --version          show the version
 
+Single-letter options combine in any order, and those taking a value take
+the arguments that follow, in turn: -cb is -c -b, and -nc 5 is -n 5 -c.
+
 No operating system keeps peak CPU or programs that have exited, so reports
 come from what `pw record` saw; run it as a service. It can be stopped
 at any moment, even with SIGKILL: every sample also leaves the minute in
@@ -278,28 +281,77 @@ pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command, Str
         None => Mode::Report,
     };
     let mut parsed = Parsed::new(mode);
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "-h" | "--help" => return Ok(Command::Help),
-            "-V" | "--version" => return Ok(Command::Version),
-            "--clear" if mode == Mode::Report => parsed.clear = true,
-            "-b" | "--breakdown" if mode == Mode::Report => {
-                parsed.report.breakdown = true;
-                parsed.report_flag = Some(arg);
-            }
-            "-c" | "--current" if mode == Mode::Report => {
-                parsed.report.current = true;
-                parsed.report_flag = Some(arg);
-            }
-            "--" if mode == Mode::Report => {
-                for pattern in args.by_ref() {
-                    parsed.take_pattern(pattern)?;
+    while let Some(grouped) = args.next() {
+        for arg in ungroup(grouped, mode) {
+            match arg.as_str() {
+                "-h" | "--help" => return Ok(Command::Help),
+                "-V" | "--version" => return Ok(Command::Version),
+                "--clear" if mode == Mode::Report => parsed.clear = true,
+                "-b" | "--breakdown" if mode == Mode::Report => {
+                    parsed.report.breakdown = true;
+                    parsed.report_flag = Some(arg);
                 }
+                "-c" | "--current" if mode == Mode::Report => {
+                    parsed.report.current = true;
+                    parsed.report_flag = Some(arg);
+                }
+                "--" if mode == Mode::Report => {
+                    for pattern in args.by_ref() {
+                        parsed.take_pattern(pattern)?;
+                    }
+                }
+                _ => parsed.take(arg, &mut args)?,
             }
-            _ => parsed.take(arg, &mut args)?,
         }
     }
     parsed.into_command()
+}
+
+/// What a single-letter option of a mode does with a value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Short {
+    Switch,
+    TakesValue,
+}
+
+impl Short {
+    /// The option `-{letter}` names in `mode`, if it takes one.
+    fn of(letter: char, mode: Mode) -> Option<Self> {
+        match letter {
+            'h' | 'V' => Some(Short::Switch),
+            'b' | 'c' if mode == Mode::Report => Some(Short::Switch),
+            _ => Flag::named(&format!("-{letter}"))
+                .filter(|flag| flag.is_taken_by(mode))
+                .map(|_| Short::TakesValue),
+        }
+    }
+}
+
+/// A group of single-letter options split into one argument each. When
+/// every letter is an option of `mode` they combine in any order, and
+/// those taking a value take the arguments that follow, in turn: `-cb` is
+/// `-c -b`, and `-nc 5` is `-n 5 -c`. Otherwise switches split off until
+/// the first option taking a value, which takes the rest of the argument:
+/// `-cn5` is `-c -n5`, and `-n5` stays whole.
+fn ungroup(arg: String, mode: Mode) -> Vec<String> {
+    let grouped = arg
+        .strip_prefix('-')
+        .filter(|rest| !rest.starts_with('-') && rest.chars().count() > 1);
+    let Some(rest) = grouped else {
+        return vec![arg];
+    };
+    if rest.chars().all(|letter| Short::of(letter, mode).is_some()) {
+        return rest.chars().map(|letter| format!("-{letter}")).collect();
+    }
+    let mut split = Vec::new();
+    for (at, letter) in rest.char_indices() {
+        if Short::of(letter, mode) != Some(Short::Switch) {
+            split.push(format!("-{}", &rest[at..]));
+            break;
+        }
+        split.push(format!("-{letter}"));
+    }
+    split
 }
 
 /// A flag's name and the value written into the same argument, if any:
@@ -411,6 +463,63 @@ mod tests {
         assert_eq!(
             error_of(&["--clear", "--current"]),
             "--clear takes no report options; got `--current`"
+        );
+    }
+
+    #[test]
+    fn single_letter_options_combine_in_any_order() {
+        for args in [&["-cb"][..], &["-bc"], &["-c", "-b"]] {
+            let opts = report_of(args);
+            assert!(opts.current && opts.breakdown, "{args:?}");
+        }
+        for args in [
+            &["-cbn", "5", "-s", "cpu"][..],
+            &["-nbcs", "5", "cpu"],
+            &["-sbnc", "cpu", "5"],
+            &["-cbn5", "-scpu"],
+        ] {
+            let opts = report_of(args);
+            assert!(opts.current && opts.breakdown, "{args:?}");
+            assert_eq!((opts.number, opts.sort), (5, SortKey::PeakCpu), "{args:?}");
+        }
+        assert_eq!(parse(&["-bh"]), Ok(Command::Help));
+        assert_eq!(parse(&["-hb"]), Ok(Command::Help));
+    }
+
+    #[test]
+    fn single_letter_record_options_combine_in_any_order() {
+        let expected = RecordOptions {
+            interval_ms: 2_000,
+            retain_ms: 7_200_000,
+            dir: Some(PathBuf::from("/x")),
+        };
+        for args in [
+            &["record", "-ird", "2s", "2h", "/x"][..],
+            &["record", "-dri", "/x", "2h", "2s"],
+        ] {
+            assert_eq!(
+                parse(args),
+                Ok(Command::Record(expected.clone())),
+                "{args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn each_option_in_a_group_is_checked_on_its_own() {
+        assert_eq!(error_of(&["-cx"]), "pw does not take `-x`; see --help");
+        assert_eq!(
+            error_of(&["record", "-ci5s"]),
+            "pw record does not take `-ci5s`; see --help"
+        );
+        assert_eq!(
+            error_of(&["--clear", "-cb"]),
+            "--clear takes no report options; got `-b`"
+        );
+        assert_eq!(error_of(&["-nb"]), "-n needs a value");
+        assert_eq!(
+            error_of(&["-nx"]),
+            "-n takes a positive whole number; got `x`"
         );
     }
 
@@ -685,5 +794,24 @@ mod tests {
         assert_eq!(split_flag("-n5"), ("-n", Some("5")));
         assert_eq!(split_flag("-n"), ("-n", None));
         assert_eq!(split_flag("record"), ("record", None));
+    }
+
+    #[test]
+    fn a_group_with_a_value_in_it_splits_until_the_value() {
+        let cases: [(Mode, &str, &[&str]); 10] = [
+            (Mode::Report, "-ntc", &["-n", "-t", "-c"]),
+            (Mode::Report, "-cbt>1gb", &["-c", "-b", "-t>1gb"]),
+            (Mode::Report, "-scpu", &["-scpu"]),
+            (Mode::Report, "-sprocs", &["-sprocs"]),
+            (Mode::Report, "-n5", &["-n5"]),
+            (Mode::Report, "-c", &["-c"]),
+            (Mode::Report, "--current", &["--current"]),
+            (Mode::Report, "--", &["--"]),
+            (Mode::Report, "firefox", &["firefox"]),
+            (Mode::Record, "-cb", &["-cb"]),
+        ];
+        for (mode, arg, expected) in cases {
+            assert_eq!(ungroup(arg.to_owned(), mode), expected, "{arg} in {mode:?}");
+        }
     }
 }

@@ -48,7 +48,10 @@ pw record [-i SPAN] [-r SPAN] [-d DIR]
 | `-r`, `--retain` | (record) how long recordings are kept, up to `30d` | `12h` |
 | `-d`, `--dir` | data folder | see below |
 
-Flags take `-n 5`, `-n5`, `--number 5`, or `--number=5`. A pattern that
+Flags take `-n 5`, `-n5`, `--number 5`, or `--number=5`. Single-letter
+options combine in any order, and those taking a value take the arguments
+that follow, in turn: `-cb` is `-c -b`, `-nc 5` is `-n 5 -c`, and
+`-nsc 5 cpu` is `-n 5 -s cpu -c`. A pattern that
 starts with `-`, or is the word `record`, goes after `--`: `pw -- -bin`.
 
 `pw firefo` shows `firefox`, `Firefox-esr`, and anything else whose name

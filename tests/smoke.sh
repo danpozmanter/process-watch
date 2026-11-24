@@ -87,7 +87,7 @@ rows=$("$bin" -d "$data" -s cpu -n 3 | awk 'f { n++ } /^PROGRAM / { f = 1 } END 
 pass "report"
 
 "$bin" -c | grep -q '^Now: CPU over 1s, ' || fail "-c samples the current moment"
-"$bin" -c -b | grep -q '^PROGRAM  *RUNS  *PROCS  *CPU  *RAM$' || fail "-c -b adds a RUNS column"
+"$bin" -cb | grep -q '^PROGRAM  *RUNS  *PROCS  *CPU  *RAM$' || fail "-c -b adds a RUNS column"
 "$bin" -c -s cpu -t '<100000%' | grep -q '^PROGRAM ' || fail "every program is below 100000% CPU now"
 pass "current"
 
