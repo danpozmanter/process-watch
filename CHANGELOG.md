@@ -3,7 +3,7 @@
 ## 0.6.0
 
 - `-c`/`--current` shows what each program uses now, CPU over one second and RAM at its end, without the recorder; with `-b` it lists each program's processes by name and the copies running now.
-- Single-letter options combine in any order: `-cb` is `-c -b`, and `-nc 5` is `-n 5 -c`.
+- Switches combine in any order, as with other Unix tools: `-cb` is `-c -b`, and `-cbn 5` is `-c -b -n 5`.
 
 ## 0.5.0
 

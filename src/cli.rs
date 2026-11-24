@@ -51,8 +51,8 @@ Both:
   -h, --help             show this help
   -V, --version          show the version
 
-Single-letter options combine in any order, and those taking a value take
-the arguments that follow, in turn: -cb is -c -b, and -nc 5 is -n 5 -c.
+Switches combine in any order, and may end with one option that takes a
+value: -cb is -c -b, and -cbn 5 is -c -b -n 5.
 
 No operating system keeps peak CPU or programs that have exited, so reports
 come from what `pw record` saw; run it as a service. It can be stopped
@@ -307,32 +307,20 @@ pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command, Str
     parsed.into_command()
 }
 
-/// What a single-letter option of a mode does with a value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Short {
-    Switch,
-    TakesValue,
-}
-
-impl Short {
-    /// The option `-{letter}` names in `mode`, if it takes one.
-    fn of(letter: char, mode: Mode) -> Option<Self> {
-        match letter {
-            'h' | 'V' => Some(Short::Switch),
-            'b' | 'c' if mode == Mode::Report => Some(Short::Switch),
-            _ => Flag::named(&format!("-{letter}"))
-                .filter(|flag| flag.is_taken_by(mode))
-                .map(|_| Short::TakesValue),
-        }
+/// Whether `-{letter}` is an option of `mode` that takes no value.
+fn is_switch(letter: char, mode: Mode) -> bool {
+    match letter {
+        'h' | 'V' => true,
+        'b' | 'c' => mode == Mode::Report,
+        _ => false,
     }
 }
 
-/// A group of single-letter options split into one argument each. When
-/// every letter is an option of `mode` they combine in any order, and
-/// those taking a value take the arguments that follow, in turn: `-cb` is
-/// `-c -b`, and `-nc 5` is `-n 5 -c`. Otherwise switches split off until
-/// the first option taking a value, which takes the rest of the argument:
-/// `-cn5` is `-c -n5`, and `-n5` stays whole.
+/// A group of single-letter options split into one argument each, as
+/// POSIX `getopt` reads it: switches in any order, then at most one option
+/// that takes a value, which takes the rest of the argument, or the next
+/// argument when nothing is left. `-cb` is `-c -b`, `-cbn5` is `-c -b -n5`,
+/// and `-nc` is `-n` with the value `c`.
 fn ungroup(arg: String, mode: Mode) -> Vec<String> {
     let grouped = arg
         .strip_prefix('-')
@@ -340,12 +328,9 @@ fn ungroup(arg: String, mode: Mode) -> Vec<String> {
     let Some(rest) = grouped else {
         return vec![arg];
     };
-    if rest.chars().all(|letter| Short::of(letter, mode).is_some()) {
-        return rest.chars().map(|letter| format!("-{letter}")).collect();
-    }
     let mut split = Vec::new();
     for (at, letter) in rest.char_indices() {
-        if Short::of(letter, mode) != Some(Short::Switch) {
+        if !is_switch(letter, mode) {
             split.push(format!("-{}", &rest[at..]));
             break;
         }
@@ -467,16 +452,16 @@ mod tests {
     }
 
     #[test]
-    fn single_letter_options_combine_in_any_order() {
+    fn switches_combine_in_any_order_before_one_option_with_a_value() {
         for args in [&["-cb"][..], &["-bc"], &["-c", "-b"]] {
             let opts = report_of(args);
             assert!(opts.current && opts.breakdown, "{args:?}");
         }
         for args in [
             &["-cbn", "5", "-s", "cpu"][..],
-            &["-nbcs", "5", "cpu"],
-            &["-sbnc", "cpu", "5"],
-            &["-cbn5", "-scpu"],
+            &["-bcn5", "-scpu"],
+            &["-n5", "-cbs", "cpu"],
+            &["-bcscpu", "-n", "5"],
         ] {
             let opts = report_of(args);
             assert!(opts.current && opts.breakdown, "{args:?}");
@@ -484,25 +469,6 @@ mod tests {
         }
         assert_eq!(parse(&["-bh"]), Ok(Command::Help));
         assert_eq!(parse(&["-hb"]), Ok(Command::Help));
-    }
-
-    #[test]
-    fn single_letter_record_options_combine_in_any_order() {
-        let expected = RecordOptions {
-            interval_ms: 2_000,
-            retain_ms: 7_200_000,
-            dir: Some(PathBuf::from("/x")),
-        };
-        for args in [
-            &["record", "-ird", "2s", "2h", "/x"][..],
-            &["record", "-dri", "/x", "2h", "2s"],
-        ] {
-            assert_eq!(
-                parse(args),
-                Ok(Command::Record(expected.clone())),
-                "{args:?}"
-            );
-        }
     }
 
     #[test]
@@ -516,11 +482,11 @@ mod tests {
             error_of(&["--clear", "-cb"]),
             "--clear takes no report options; got `-b`"
         );
-        assert_eq!(error_of(&["-nb"]), "-n needs a value");
         assert_eq!(
-            error_of(&["-nx"]),
-            "-n takes a positive whole number; got `x`"
+            error_of(&["-nc", "5"]),
+            "-n takes a positive whole number; got `c`"
         );
+        assert_eq!(error_of(&["-cbn"]), "-n needs a value");
     }
 
     #[test]
@@ -798,8 +764,9 @@ mod tests {
 
     #[test]
     fn a_group_with_a_value_in_it_splits_until_the_value() {
-        let cases: [(Mode, &str, &[&str]); 10] = [
-            (Mode::Report, "-ntc", &["-n", "-t", "-c"]),
+        let cases: [(Mode, &str, &[&str]); 11] = [
+            (Mode::Report, "-ntc", &["-ntc"]),
+            (Mode::Report, "-cbn", &["-c", "-b", "-n"]),
             (Mode::Report, "-cbt>1gb", &["-c", "-b", "-t>1gb"]),
             (Mode::Report, "-scpu", &["-scpu"]),
             (Mode::Report, "-sprocs", &["-sprocs"]),
